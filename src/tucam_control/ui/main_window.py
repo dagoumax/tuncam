@@ -18,9 +18,11 @@ from PySide6.QtWidgets import (
 
 from ..camera import CameraController, CameraInfo
 from ..data_processor import DataProcessor
+from ..gas_analyzer import GasAnalyzer, GasConfig
 from .acquisition_tab import AcquisitionTab
 from .settings_tab import SettingsTab
 from .data_tab import DataTab
+from .concentration_tab import ConcentrationTab
 
 
 class MainWindow(QMainWindow):
@@ -35,6 +37,8 @@ class MainWindow(QMainWindow):
 
         self._camera = CameraController()
         self._processor = DataProcessor()
+        self._analyzer = GasAnalyzer()
+        self._analyzer.gases = GasAnalyzer.default_gases()
         self._settings: dict = {
             "exposure_time_ms": 1000.0,
             "temperature_c": -10.0,
@@ -74,10 +78,12 @@ class MainWindow(QMainWindow):
         self._acq_tab = AcquisitionTab()
         self._settings_tab = SettingsTab()
         self._data_tab = DataTab()
+        self._conc_tab = ConcentrationTab()
 
         self._tabs.addTab(self._acq_tab, "采集 / Acquisition")
         self._tabs.addTab(self._settings_tab, "设置 / Settings")
         self._tabs.addTab(self._data_tab, "图谱 / Spectrum")
+        self._tabs.addTab(self._conc_tab, "浓度 / Concentration")
 
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
@@ -416,6 +422,13 @@ class MainWindow(QMainWindow):
             self._data_tab.set_row_labels(labels)
             self._data_tab.display_array(result)
             self._data_tab.set_baseline_data(self._processor.last_baseline)
+
+            # Gas analysis on each row group's spectrum
+            gas_names = [g.name for g in self._analyzer.gases]
+            self._conc_tab.set_gas_names(gas_names)
+            if result.shape[0] > 0:
+                g_results = self._analyzer.analyze(result[0])
+                self._conc_tab.add_data_point(g_results)
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -428,13 +441,20 @@ class MainWindow(QMainWindow):
         result = self._processor.reprocess()
         if result is not None:
             row_groups = self._processor.row_groups
-            labels = [
-                f"行 {s}-{e}"
-                for s, e in row_groups
-            ] if row_groups else [f"全图 {result.shape[1]} 列"]
+            labels = (
+                [f"行 {s}-{e}" for s, e in row_groups]
+                if row_groups
+                else [f"全图 {result.shape[1]} 列"]
+            )
             self._data_tab.set_row_labels(labels)
             self._data_tab.display_array(result)
             self._data_tab.set_baseline_data(self._processor.last_baseline)
+
+            gas_names = [g.name for g in self._analyzer.gases]
+            self._conc_tab.set_gas_names(gas_names)
+            if result.shape[0] > 0:
+                g_results = self._analyzer.analyze(result[0])
+                self._conc_tab.add_data_point(g_results)
 
     # ------------------------------------------------------------------
     # Close
