@@ -22,8 +22,10 @@ class GasConfig:
 
 def _local_baseline(spectrum: np.ndarray, center: int, window: int) -> float:
     """Estimate local baseline as the minimum value in the search window."""
-    lo = max(0, center - window)
+    lo = max(0, min(center - window, len(spectrum) - 1))
     hi = min(len(spectrum), center + window + 1)
+    if lo >= hi:
+        return 0.0
     return float(np.min(spectrum[lo:hi]))
 
 
@@ -37,8 +39,10 @@ def find_peak(spectrum: np.ndarray, center: int, window: int) -> tuple[int, floa
         Peak area is computed as sum of (value – local_baseline) over the
         window, clamped to non-negative.
     """
-    lo = max(0, center - window)
+    lo = max(0, min(center - window, len(spectrum) - 1))
     hi = min(len(spectrum), center + window + 1)
+    if lo >= hi:
+        return center, 0.0, 0.0
     region = spectrum[lo:hi]
     peak_col = lo + int(np.argmax(region))
     peak_height = float(region.max())
@@ -84,7 +88,8 @@ class GasAnalyzer:
 
     def __init__(self) -> None:
         self._gases: list[GasConfig] = []
-        self._threshold_sigma: float = 2.0    # min height = noise_sigma × threshold
+        self._threshold_sigma: float = 2.0
+        self._merge_factor: int = 1
         self._last_results: list[GasResult] = []
 
     @property
@@ -104,6 +109,14 @@ class GasAnalyzer:
         self._threshold_sigma = v
 
     @property
+    def merge_factor(self) -> int:
+        return self._merge_factor
+
+    @merge_factor.setter
+    def merge_factor(self, n: int) -> None:
+        self._merge_factor = max(1, n)
+
+    @property
     def last_results(self) -> list[GasResult]:
         return self._last_results
 
@@ -114,11 +127,13 @@ class GasAnalyzer:
     def analyze(self, spectrum: np.ndarray) -> list[GasResult]:
         """
         Find peaks and compute concentrations for all configured gases
-        on a single 1-D spectrum.
+        on a single 1-D spectrum.  Gas positions are automatically scaled
+        by ``merge_factor`` to account for column merging.
         """
         if len(self._gases) == 0:
             return []
 
+        factor = self._merge_factor
         noise_std = float(np.std(spectrum))
         threshold = self._threshold_sigma * noise_std
 
@@ -126,8 +141,10 @@ class GasAnalyzer:
         total_component = 0.0
 
         for cfg in self._gases:
-            col, height, area = find_peak(spectrum, cfg.position, cfg.window)
-            local_bl = _local_baseline(spectrum, cfg.position, cfg.window)
+            scaled_pos = cfg.position // factor
+            scaled_win = max(1, cfg.window // factor)
+            col, height, area = find_peak(spectrum, scaled_pos, scaled_win)
+            local_bl = _local_baseline(spectrum, scaled_pos, scaled_win)
             net_height = height - local_bl
 
             detected = net_height > threshold

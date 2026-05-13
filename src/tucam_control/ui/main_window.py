@@ -403,6 +403,7 @@ class MainWindow(QMainWindow):
         gas_configs = updates.get("gas_configs")
         if gas_configs is not None:
             self._analyzer.gases = gas_configs
+        self._analyzer.merge_factor = self._settings.get("merge_factor", 1)
 
         self._reprocess_cached()
 
