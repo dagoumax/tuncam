@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Settings tab — exposure, temperature, fan, row groups, merge factor."""
+"""Settings tab — exposure, temperature, fan, row groups, merge factor, gas config."""
 
 from __future__ import annotations
 
@@ -11,17 +11,21 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..camera import CameraController
 from ..data_processor import DataProcessor
+from ..gas_analyzer import GasConfig
 
 
 class SettingsTab(QWidget):
@@ -32,6 +36,7 @@ class SettingsTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._setup_ui()
+        self._init_gas_table()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -91,7 +96,7 @@ class SettingsTab(QWidget):
 
         self._arpls_mode_combo = QComboBox()
         self._arpls_mode_combo.addItem("原始数据 / Raw", "raw")
-        self._arpls_mode_combo.addItem("校正后 / Corrected (data - baseline)", "corrected")
+        self._arpls_mode_combo.addItem("校正后 / Corrected", "corrected")
         self._arpls_mode_combo.addItem("仅基线 / Baseline Only", "baseline")
         arpls_form.addRow("输出模式 / Output Mode:", self._arpls_mode_combo)
 
@@ -100,7 +105,6 @@ class SettingsTab(QWidget):
         self._arpls_lam_spin.setDecimals(0)
         self._arpls_lam_spin.setValue(1e5)
         self._arpls_lam_spin.setSingleStep(1e5)
-        self._arpls_lam_spin.setToolTip("越大基线越平滑")
         arpls_form.addRow("平滑参数 lam:", self._arpls_lam_spin)
 
         self._arpls_iter_spin = QSpinBox()
@@ -116,6 +120,29 @@ class SettingsTab(QWidget):
         arpls_form.addRow("收敛容差 tol:", self._arpls_tol_spin)
 
         layout.addWidget(arpls_gb)
+
+        # ---- Gas configuration ----
+        gas_gb = QGroupBox("气体配置 / Gas Configuration")
+        gas_layout = QVBoxLayout(gas_gb)
+
+        self._gas_table = QTableWidget()
+        self._gas_table.setColumnCount(4)
+        self._gas_table.setHorizontalHeaderLabels(["名称 / Name", "位置 / Pos", "窗口 / Window", "系数 / Coeff"])
+        self._gas_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._gas_table.setMinimumHeight(120)
+        gas_layout.addWidget(self._gas_table)
+
+        gas_btn_row = QHBoxLayout()
+        self._btn_add_gas = QPushButton("添加气体 / Add Gas")
+        self._btn_del_gas = QPushButton("删除选中 / Delete Selected")
+        self._btn_add_gas.clicked.connect(self._on_add_gas)
+        self._btn_del_gas.clicked.connect(self._on_del_gas)
+        gas_btn_row.addWidget(self._btn_add_gas)
+        gas_btn_row.addWidget(self._btn_del_gas)
+        gas_btn_row.addStretch()
+        gas_layout.addLayout(gas_btn_row)
+
+        layout.addWidget(gas_gb)
 
         # ---- Info labels ----
         info_gb = QGroupBox("参数范围 / Property Ranges")
@@ -136,6 +163,54 @@ class SettingsTab(QWidget):
         layout.addLayout(btn_row)
 
         layout.addStretch()
+
+    def _init_gas_table(self) -> None:
+        configs = GasConfig.default_gases()
+        for cfg in configs:
+            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient)
+
+    def _add_gas_row(self, name: str = "", pos: int = 0, window: int = 15, coeff: float = 1.0) -> None:
+        row = self._gas_table.rowCount()
+        self._gas_table.insertRow(row)
+        self._gas_table.setItem(row, 0, QTableWidgetItem(name))
+        self._gas_table.setItem(row, 1, QTableWidgetItem(str(pos)))
+        self._gas_table.setItem(row, 2, QTableWidgetItem(str(window)))
+        self._gas_table.setItem(row, 3, QTableWidgetItem(str(coeff)))
+
+    def _get_gas_configs(self) -> list[GasConfig]:
+        configs = []
+        for row in range(self._gas_table.rowCount()):
+            items = [
+                (self._gas_table.item(row, c).text().strip() if self._gas_table.item(row, c) else "")
+                for c in range(4)
+            ]
+            if not items[0]:
+                continue
+            try:
+                configs.append(GasConfig(
+                    name=items[0],
+                    position=int(items[1]),
+                    window=int(items[2]),
+                    coefficient=float(items[3]),
+                ))
+            except (ValueError, IndexError):
+                continue
+        return configs
+
+    def update_gas_table(self, configs: list[GasConfig]) -> None:
+        self._gas_table.setRowCount(0)
+        for cfg in configs:
+            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient)
+
+    def _on_add_gas(self) -> None:
+        self._add_gas_row("New", 0, 15, 1.0)
+
+    def _on_del_gas(self) -> None:
+        row = self._gas_table.currentRow()
+        if row >= 0:
+            self._gas_table.removeRow(row)
+        else:
+            QMessageBox.information(self, "提示 / Info", "请先点击选中要删除的行。")
 
     def update_ranges(self, camera: CameraController) -> None:
         try:
@@ -168,6 +243,15 @@ class SettingsTab(QWidget):
         else:
             groups = []
 
+        gas_configs = self._get_gas_configs()
+        if not gas_configs:
+            QMessageBox.warning(
+                self,
+                "气体配置为空 / No Gas Configured",
+                "请至少添加一种气体。",
+            )
+            return
+
         updates = {
             "exposure_time_ms": self._exp_spin.value(),
             "temperature_c": self._temp_spin.value(),
@@ -179,5 +263,6 @@ class SettingsTab(QWidget):
             "arpls_lam": self._arpls_lam_spin.value(),
             "arpls_max_iter": self._arpls_iter_spin.value(),
             "arpls_tol": self._arpls_tol_spin.value(),
+            "gas_configs": gas_configs,
         }
         self.settings_changed.emit(updates)

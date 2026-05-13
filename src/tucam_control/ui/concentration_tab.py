@@ -64,14 +64,14 @@ class ConcentrationTab(QWidget):
         gb_table = QGroupBox("当前浓度 / Current Concentration")
         tbl_layout = QVBoxLayout(gb_table)
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["气体", "峰高", "分量", "浓度"])
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["气体 / Gas", "峰高 / Height", "浓度 / Conc"])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setMinimumWidth(350)
         tbl_layout.addWidget(self._table)
         left.addWidget(gb_table)
 
-        self._total_label = QLabel("总分量: --")
+        self._total_label = QLabel("浓度总和 / Total: --")
         left.addWidget(self._total_label)
 
         gb_ctrl = QGroupBox("图表控制 / Chart Control")
@@ -138,7 +138,7 @@ class ConcentrationTab(QWidget):
         self._history.clear()
         self._start_time = time.time()
         self._table.setRowCount(0)
-        self._total_label.setText("总分量: --")
+        self._total_label.setText("浓度总和 / Total: --")
         self._redraw()
 
     # ------------------------------------------------------------------
@@ -147,17 +147,16 @@ class ConcentrationTab(QWidget):
 
     def _update_table(self, gas_results: list) -> None:
         self._table.setRowCount(len(gas_results))
-        total = 0.0
+        total_conc = 0.0
         for i, r in enumerate(gas_results):
-            total += r.component
+            total_conc += r.concentration
             detected_mark = "" if r.detected else " (未检出)"
             self._table.setItem(i, 0, QTableWidgetItem(f"{r.name}{detected_mark}"))
             self._table.setItem(i, 1, QTableWidgetItem(f"{r.peak_height:.1f}"))
-            self._table.setItem(i, 2, QTableWidgetItem(f"{r.component:.2f}"))
             self._table.setItem(
-                i, 3, QTableWidgetItem(f"{r.concentration * 100:.2f} %")
+                i, 2, QTableWidgetItem(f"{r.concentration * 100:.2f} %")
             )
-        self._total_label.setText(f"总分量: {total:.2f}")
+        self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
 
     def _redraw(self) -> None:
         self._ax.clear()

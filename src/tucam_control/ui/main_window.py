@@ -400,6 +400,10 @@ class MainWindow(QMainWindow):
         self._processor.arPLS_max_iter = self._settings.get("arpls_max_iter", 50)
         self._processor.arPLS_tol = self._settings.get("arpls_tol", 1e-6)
 
+        gas_configs = updates.get("gas_configs")
+        if gas_configs is not None:
+            self._analyzer.gases = gas_configs
+
         self._reprocess_cached()
 
         self.status_changed.emit("设置已应用 / Settings applied")
