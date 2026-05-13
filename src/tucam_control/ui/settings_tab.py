@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from ..camera import CameraController
 from ..data_processor import DataProcessor
-from ..gas_analyzer import GasConfig
+from ..gas_analyzer import GasAnalyzer, GasConfig
 
 
 class SettingsTab(QWidget):
@@ -165,7 +165,7 @@ class SettingsTab(QWidget):
         layout.addStretch()
 
     def _init_gas_table(self) -> None:
-        configs = GasConfig.default_gases()
+        configs = GasAnalyzer.default_gases()
         for cfg in configs:
             self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient)
 
