@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Concentration tab — gas concentration display and trend chart."""
+"""Concentration tab — gas concentration display and trend chart (multi-group)."""
 
 from __future__ import annotations
 
 import csv
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import matplotlib
 import matplotlib.dates as mdates
@@ -51,17 +51,16 @@ _WINDOW_SIZE = 100
 
 
 class ConcentrationTab(QWidget):
-    """Fourth tab: current concentrations table + trend chart."""
+    """Fourth tab: current concentrations table + trend chart (multi-group)."""
 
     def __init__(self) -> None:
         super().__init__()
+        # _history[group_label][gas_name] = (vals, times)
+        self._history: dict[str, dict[str, tuple[list[float], list[object]]]] = {}
         self._gas_names: list[str] = []
-        self._history: dict[str, tuple[list[float], list[object]]] = defaultdict(
-            lambda: ([], [])
-        )
+        self._group_labels: list[str] = []
         self._batch_idx: int = 0
         self._mode: str = "time"
-        self._start_time: float = time.time()
         self._dirty: bool = False
         self._last_export_dir: str = ""
         self._setup_ui()
@@ -87,13 +86,17 @@ class ConcentrationTab(QWidget):
 
         gb_ctrl = QGroupBox("图表控制 / Chart Control")
         ctrl_layout = QVBoxLayout(gb_ctrl)
-        ctrl_row = QHBoxLayout()
-        ctrl_row.addWidget(QLabel("气体 / Gas:"))
+
+        ctrl_layout.addWidget(QLabel("行组 / Row Group:"))
+        self._group_combo = QComboBox()
+        self._group_combo.currentIndexChanged.connect(self._redraw)
+        ctrl_layout.addWidget(self._group_combo)
+
+        ctrl_layout.addWidget(QLabel("气体 / Gas:"))
         self._gas_combo = QComboBox()
         self._gas_combo.addItem("全部 / All", "all")
         self._gas_combo.currentIndexChanged.connect(self._redraw)
-        ctrl_row.addWidget(self._gas_combo)
-        ctrl_layout.addLayout(ctrl_row)
+        ctrl_layout.addWidget(self._gas_combo)
 
         btn_row = QHBoxLayout()
         self._btn_clear = QPushButton("清除历史 / Clear")
@@ -131,32 +134,52 @@ class ConcentrationTab(QWidget):
 
     def set_gas_names(self, names: list[str]) -> None:
         self._gas_names = names
-        self._gas_combo.blockSignals(True)
-        self._gas_combo.clear()
-        self._gas_combo.addItem("全部 / All", "all")
-        for name in names:
-            self._gas_combo.addItem(name, name)
-        self._gas_combo.blockSignals(False)
+        self._update_gas_combo()
 
-    def add_data_point(self, gas_results: list, mode: str = "time") -> None:
+    def set_group_labels(self, labels: list[str]) -> None:
+        self._group_labels = labels
+        self._group_combo.blockSignals(True)
+        self._group_combo.clear()
+        for lbl in labels:
+            self._group_combo.addItem(lbl, lbl)
+        self._group_combo.blockSignals(False)
+
+    def add_data_point(self, all_group_results: list, group_labels: list[str],
+                       mode: str = "time") -> None:
+        """
+        Add a measurement point for all row groups.
+
+        *all_group_results*: list of list of GasResult (per group, per gas).
+        *group_labels*: labels for each group.
+        """
         self._mode = mode
         if mode == "index":
             t = float(self._batch_idx)
             self._batch_idx += 1
         else:
             t = datetime.now()
-        for r in gas_results:
-            vals, times = self._history[r.name]
-            vals.append(r.concentration * 100)
-            times.append(t)
 
-        self._update_table(gas_results)
+        for glabel, gas_results in zip(group_labels, all_group_results):
+            if glabel not in self._history:
+                self._history[glabel] = {}
+            group_map = self._history[glabel]
+            for r in gas_results:
+                if r.name not in group_map:
+                    group_map[r.name] = ([], [])
+                vals, times = group_map[r.name]
+                vals.append(r.concentration * 100)
+                times.append(t)
+
+        self.set_group_labels(group_labels)
+        self.set_gas_names([r.name for r in all_group_results[0]])
+
+        if all_group_results:
+            self._update_table(all_group_results[0])
         self._redraw()
 
     def clear_history(self) -> None:
         self._history.clear()
         self._batch_idx = 0
-        self._start_time = time.time()
         self._table.setRowCount(0)
         self._total_label.setText("浓度总和 / Total: --")
         self._redraw()
@@ -164,6 +187,20 @@ class ConcentrationTab(QWidget):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _update_gas_combo(self) -> None:
+        self._gas_combo.blockSignals(True)
+        self._gas_combo.clear()
+        self._gas_combo.addItem("全部 / All", "all")
+        for name in self._gas_names:
+            self._gas_combo.addItem(name, name)
+        self._gas_combo.blockSignals(False)
+
+    def _selected_group_data(self) -> dict[str, tuple[list[float], list[object]]]:
+        glabel = self._group_combo.currentData()
+        if glabel and glabel in self._history:
+            return self._history[glabel]
+        return {}
 
     def _update_table(self, gas_results: list) -> None:
         self._table.setRowCount(len(gas_results))
@@ -185,36 +222,43 @@ class ConcentrationTab(QWidget):
         self._dirty = False
         self._ax.clear()
 
-        selected = self._gas_combo.currentData()
+        group_data = self._selected_group_data()
+        if not group_data:
+            self._canvas.draw_idle()
+            return
 
-        # Detect whether time data is datetime or float
+        selected_gas = self._gas_combo.currentData()
+
+        # Detect datetime vs float
         is_datetime = False
-        for _, times in self._history.values():
+        for _, (_, times) in group_data.items():
             if len(times) > 0:
-                from datetime import datetime
                 is_datetime = isinstance(times[0], datetime)
                 break
+        total_pts = sum(len(v) for v, _ in group_data.values())
+        self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
-        if selected == "all":
+        glabel = self._group_combo.currentData() or ""
+
+        if selected_gas == "all":
             for i, name in enumerate(self._gas_names):
-                vals, times = self._history[name]
+                if name not in group_data:
+                    continue
+                vals, times = group_data[name]
                 if len(vals) == 0:
                     continue
-                t = times if is_datetime else [float(v) for v in times]
-                self._ax.plot(t, vals, color=_COLORS[i % len(_COLORS)],
+                self._ax.plot(times, vals, color=_COLORS[i % len(_COLORS)],
                               linewidth=1.0, label=name, marker=".", markersize=2)
-            self._ax.set_title("所有气体浓度变化 / All Gas Concentrations")
-        elif selected in self._gas_names:
-            vals, times = self._history[selected]
-            if len(vals) > 0:
-                color = _COLORS[self._gas_names.index(selected) % len(_COLORS)]
-                t = times if is_datetime else [float(v) for v in times]
-                self._ax.plot(t, vals, color=color, linewidth=1.2,
-                              label=selected, marker=".", markersize=2)
-            self._ax.set_title(f"气体浓度变化 / {selected} Concentration")
-
-        total_pts = sum(len(v) for v, _ in self._history.values())
-        self._pt_label.setText(f"数据点 / Points: {total_pts}")
+            self._ax.set_title(f"浓度变化 [{glabel}] / All Gases")
+        else:
+            if selected_gas in group_data:
+                vals, times = group_data[selected_gas]
+                if len(vals) > 0:
+                    color = _COLORS[self._gas_names.index(selected_gas) % len(_COLORS)
+                                    ] if selected_gas in self._gas_names else _COLORS[0]
+                    self._ax.plot(times, vals, color=color, linewidth=1.2,
+                                  label=selected_gas, marker=".", markersize=2)
+            self._ax.set_title(f"浓度变化 [{glabel}] / {selected_gas}")
 
         if is_datetime:
             self._ax.set_xlabel("系统时间 / System Time")
@@ -225,21 +269,19 @@ class ConcentrationTab(QWidget):
 
         if total_pts > _WINDOW_SIZE:
             if is_datetime:
-                all_times = []
-                for _, times in self._history.values():
-                    all_times.extend(times)
-                all_times.sort()
-                if len(all_times) >= _WINDOW_SIZE:
-                    left_bound = all_times[-_WINDOW_SIZE]
-                    right_bound = all_times[-1]
-                    self._ax.set_xlim(left=left_bound, right=right_bound)
+                all_t = []
+                for _, (_, times) in group_data.items():
+                    all_t.extend(times)
+                all_t.sort()
+                if len(all_t) >= _WINDOW_SIZE:
+                    self._ax.set_xlim(left=all_t[-_WINDOW_SIZE], right=all_t[-1])
             else:
                 self._ax.set_xlim(left=max(0, total_pts - _WINDOW_SIZE), right=total_pts - 0.5)
 
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
         has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
-        if has_artists and (selected != "all" or len(self._gas_names) <= 5):
+        if has_artists and (selected_gas != "all" or len(self._gas_names) <= 5):
             self._ax.legend(loc="upper right", fontsize=8)
         self._canvas.draw_idle()
 
@@ -252,8 +294,8 @@ class ConcentrationTab(QWidget):
         self.clear_history()
 
     def _on_export(self) -> None:
-        total_pts = sum(len(v) for v, _ in self._history.values())
-        if not self._gas_names or total_pts == 0:
+        group_data = self._selected_group_data()
+        if not group_data:
             QMessageBox.information(self, "导出 / Export", "没有数据可导出。")
             return
 
@@ -268,34 +310,40 @@ class ConcentrationTab(QWidget):
         self._last_export_dir = path
 
         try:
-            from datetime import datetime
+            from datetime import datetime as dt_type
+            gas_names = sorted(group_data.keys())
             is_datetime = False
-            for _, times in self._history.values():
+            for _, (_, times) in group_data.items():
                 if len(times) > 0:
-                    is_datetime = isinstance(times[0], datetime)
+                    is_datetime = isinstance(times[0], dt_type)
                     break
-            header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            header += self._gas_names
-            writer.writerow(header)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
+                header += gas_names
+                writer.writerow(header)
 
-            max_len = max((len(vals) for vals, _ in self._history.values()), default=0)
-            for i in range(max_len):
-                row = []
-                # Grab time from the first gas that has this index
-                t_val = ""
-                for name in self._gas_names:
-                    vals, times = self._history[name]
-                    if i < len(times):
-                        if is_datetime:
-                            t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                max_len = max((len(vals) for vals, _ in group_data.values()), default=0)
+                for i in range(max_len):
+                    row = []
+                    t_val = ""
+                    for name in gas_names:
+                        if name in group_data:
+                            _, times = group_data[name]
+                            if i < len(times):
+                                if is_datetime:
+                                    t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                                else:
+                                    t_val = str(int(times[i]))
+                                break
+                    row.append(t_val)
+                    for name in gas_names:
+                        if name in group_data:
+                            vals, _ = group_data[name]
+                            row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
                         else:
-                            t_val = str(int(times[i]))
-                        break
-                row.append(t_val)
-                for name in self._gas_names:
-                    vals, _ = self._history[name]
-                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
-                writer.writerow(row)
+                            row.append("")
+                    writer.writerow(row)
 
             QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
         except Exception as exc:

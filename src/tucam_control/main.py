@@ -3,29 +3,42 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
 
 
-class _StderrFilter:
-    """Suppress libpng iCCP sRGB profile warnings from Qt PNG loader."""
+# ── Redirect C-level stderr (fd 2) to suppress libpng iCCP warnings ──
+_original_fd2: int | None = None
+_pipe_r: int | None = None
 
-    def __init__(self, original) -> None:
-        self._orig = original
+def _start_stderr_filter() -> None:
+    global _original_fd2, _pipe_r
+    _original_fd2 = os.dup(2)
+    _pipe_r, _pipe_w = os.pipe()
+    os.dup2(_pipe_w, 2)
+    os.close(_pipe_w)
 
-    def write(self, text: str) -> int:
-        if isinstance(text, str) and ("iCCP" in text or "sRGB" in text):
-            return 0
-        return self._orig.write(text)
+    def _filter() -> None:
+        while True:
+            try:
+                data = os.read(_pipe_r, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            text = data.decode("utf-8", errors="replace")
+            if "iCCP" not in text and "sRGB" not in text:
+                try:
+                    os.write(_original_fd2, data)
+                except OSError:
+                    break
 
-    def flush(self) -> None:
-        self._orig.flush()
+    t = threading.Thread(target=_filter, daemon=True)
+    t.start()
 
-    def __getattr__(self, name: str):
-        return getattr(self._orig, name)
+_start_stderr_filter()
 
-
-if not isinstance(sys.stderr, _StderrFilter):
-    sys.stderr = _StderrFilter(sys.stderr)
 
 from PySide6.QtWidgets import QApplication
 
