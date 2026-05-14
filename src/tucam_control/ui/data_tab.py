@@ -9,15 +9,19 @@ import numpy as np
 from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from ..calibration import apply_calibration, detect_peaks, fit_calibration, CalibrationPoint
 
 _CJK_FONTS = ["Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Micro Hei", "Noto Sans CJK SC"]
 _available = {f.name for f in fm.fontManager.ttflist}
@@ -48,6 +52,7 @@ class DataTab(QWidget):
         self._cursor_on: bool = False
         self._cursor_idx: int = 0
         self._cursor_group: int = 0
+        self._calib_coeffs: np.ndarray | None = None
         self._cursor_line = None
         self._cursor_annot = None
         self._dirty: bool = False
@@ -80,6 +85,10 @@ class DataTab(QWidget):
         ctrl.addWidget(self._cursor_toggle_cb)
 
         ctrl.addWidget(QLabel("    "))
+        self._calib_btn = QPushButton("校准 / Calib")
+        self._calib_btn.setMaximumWidth(80)
+        self._calib_btn.clicked.connect(self._on_calibrate)
+        ctrl.addWidget(self._calib_btn)
 
         self._shape_label = QLabel("Shape: --")
         ctrl.addWidget(self._shape_label)
@@ -121,6 +130,31 @@ class DataTab(QWidget):
     def set_row_labels(self, labels: list[str]) -> None:
         self._row_labels = labels
         self._update_group_combo()
+
+    def set_calibration(self, coeffs: np.ndarray | None) -> None:
+        self._calib_coeffs = coeffs
+        self._cursor_on = False
+        self._redraw()
+
+    @Slot()
+    def _on_calibrate(self) -> None:
+        if self._data is None or self._data.shape[0] == 0:
+            QMessageBox.warning(self, "校准 / Calibrate", "请先采集或载入一张图片。")
+            return
+        from .calibration_dialog import CalibrationDialog
+        dlg = CalibrationDialog(self._data, self._row_labels, self._calib_coeffs, self)
+        if dlg.exec():
+            self._calib_coeffs = dlg.result_coeffs
+            self._redraw()
+
+    def _x_axis_values(self, n_cols: int) -> np.ndarray:
+        pixels = np.arange(n_cols)
+        if self._calib_coeffs is not None:
+            return apply_calibration(pixels, self._calib_coeffs)
+        return pixels.astype(np.float64)
+
+    def _x_axis_label(self) -> str:
+        return "拉曼位移 / Raman Shift (cm⁻¹)" if self._calib_coeffs is not None else "列号 / Column Index"
 
     # ------------------------------------------------------------------
     # Cursor
@@ -216,7 +250,7 @@ class DataTab(QWidget):
         else:
             self._plot_all(show_bl)
 
-        self._ax.set_xlabel("列号 / Column Index")
+        self._ax.set_xlabel(self._x_axis_label())
         self._ax.set_ylabel("灰度均值 / Mean Grayscale")
         handles, labels = self._ax.get_legend_handles_labels()
         if len(handles) > 0:
@@ -241,6 +275,10 @@ class DataTab(QWidget):
         if x < 0 or x >= n_data:
             return
 
+        x_val = self._x_axis_values(n_data)[x]
+        x_unit = "cm⁻¹" if self._calib_coeffs is not None else "列"
+        x_str = f"{x_val:.1f} {x_unit}"
+
         mode = self._mode_combo.currentData()
 
         if mode == "single":
@@ -248,11 +286,11 @@ class DataTab(QWidget):
             if g is None or g < 0:
                 g = 0
             yy = self._data[g, x]
-            self._ax.axvline(x=x, color="red", linewidth=0.8, alpha=0.6)
+            self._ax.axvline(x=x_val, color="red", linewidth=0.8, alpha=0.6)
             self._ax.axhline(y=yy, color="red", linewidth=0.6, alpha=0.4, linestyle="--")
-            self._ax.plot(x, yy, "ro", markersize=5)
+            self._ax.plot(x_val, yy, "ro", markersize=5)
             self._ax.annotate(
-                f"列 {x}  =  {yy:.1f}",
+                f"{x_str}  =  {yy:.1f}",
                 xy=(0.02, 0.96),
                 xycoords="axes fraction",
                 color="red",
@@ -260,16 +298,14 @@ class DataTab(QWidget):
                 verticalalignment="top",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
             )
-            self._cursor_label.setText(f"列 {x}, 值 {yy:.1f}  (←→移动, 右键取消)")
+            self._cursor_label.setText(f"{x_str}, 值 {yy:.1f}  (←→移动, 右键取消)")
         else:
             ys = [self._data[i, x] for i in range(self._data.shape[0])]
-            ymin = self._data.min()
-            ymax = self._data.max()
-            self._ax.axvline(x=x, color="red", linewidth=0.8, alpha=0.6)
+            self._ax.axvline(x=x_val, color="red", linewidth=0.8, alpha=0.6)
             for i, y in enumerate(ys):
                 color = _COLORS[i % len(_COLORS)]
                 self._ax.axhline(y=y, color=color, linewidth=0.5, alpha=0.3, linestyle="--")
-            text_lines = [f"列 {x}:"]
+            text_lines = [f"{x_str}:"]
             for i, y in enumerate(ys):
                 label = self._row_labels[i] if i < len(self._row_labels) else f"G{i+1}"
                 text_lines.append(f"  {label}: {y:.1f}")
@@ -282,14 +318,14 @@ class DataTab(QWidget):
                 verticalalignment="top",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
             )
-            self._cursor_label.setText(f"列 {x}  (←→移动, 右键取消)")
+            self._cursor_label.setText(f"{x_str}  (←→移动, 右键取消)")
 
     def _plot_single(self, idx: int, show_baseline: bool) -> None:
         if idx >= self._data.shape[0]:
             return
         label = self._row_labels[idx] if idx < len(self._row_labels) else f"组 {idx + 1}"
         spectrum = self._data[idx]
-        x = np.arange(len(spectrum))
+        x = self._x_axis_values(len(spectrum))
         self._ax.plot(x, spectrum, color=_COLORS[0], linewidth=0.8, label=f"{label} (data)")
 
         if show_baseline and self._baseline is not None and idx < self._baseline.shape[0]:
@@ -306,7 +342,7 @@ class DataTab(QWidget):
             label = self._row_labels[i] if i < len(self._row_labels) else f"组 {i + 1}"
             color = _COLORS[i % len(_COLORS)]
             spectrum = self._data[i]
-            x = np.arange(len(spectrum))
+            x = self._x_axis_values(len(spectrum))
             self._ax.plot(x, spectrum, color=color, linewidth=0.8, label=f"{label}")
 
             if show_baseline and self._baseline is not None and i < self._baseline.shape[0]:

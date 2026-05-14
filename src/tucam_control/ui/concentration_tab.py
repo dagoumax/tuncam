@@ -233,9 +233,30 @@ class ConcentrationTab(QWidget):
         is_all_groups = (glabel == "__all__")
 
         if is_all_groups and selected_gas == "all":
-            # Too many lines — show first group as fallback
-            is_all_groups = False
-            glabel = self._group_labels[0] if self._group_labels else None
+            # All groups + all gases: each line labeled "行X-Y GasName"
+            is_datetime = False
+            total_pts = 0
+            color_idx = 0
+            for lbl in self._group_labels:
+                if lbl not in self._history:
+                    continue
+                gdata = self._history[lbl]
+                for name in self._gas_names:
+                    if name not in gdata:
+                        continue
+                    vals, times = gdata[name]
+                    if len(vals) == 0:
+                        continue
+                    if not is_datetime and len(times) > 0:
+                        is_datetime = isinstance(times[0], datetime)
+                    color = _COLORS[color_idx % len(_COLORS)]
+                    color_idx += 1
+                    line_label = f"{lbl} {name}"
+                    self._ax.plot(times, vals, color=color, linewidth=0.8,
+                                  label=line_label, marker=".", markersize=1)
+                    total_pts += len(vals)
+            self._ax.set_title("浓度变化 [全部行组] / All Groups & Gases")
+            self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
         if not is_all_groups:
             # Single group mode
@@ -293,8 +314,13 @@ class ConcentrationTab(QWidget):
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
         has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
-        if has_artists and (selected_gas != "all" or len(self._gas_names) <= 5):
-            self._ax.legend(loc="upper right", fontsize=8)
+        show_legend = has_artists and (
+            is_all_groups or selected_gas != "all" or len(self._gas_names) <= 5
+        )
+        if show_legend:
+            self._ax.legend(loc="upper right", fontsize=7)
+        elif has_artists:
+            self._ax.legend(loc="upper right", fontsize=7, ncol=2)
         self._canvas.draw_idle()
 
     def _plot_group_data(self, group_data: dict, selected_gas: str, glabel: str) -> tuple[bool, int]:
