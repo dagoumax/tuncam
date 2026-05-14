@@ -148,6 +148,7 @@ class DataTab(QWidget):
         self._redraw()
 
     def _on_click(self, event) -> None:
+        import traceback
         try:
             if event.inaxes != self._ax or self._data is None:
                 return
@@ -169,8 +170,8 @@ class DataTab(QWidget):
                 self._cursor_on = True
                 self._canvas.setFocus()
                 self._redraw()
-        except Exception:
-            pass
+        except Exception as e:
+            traceback.print_exc()
 
     def _on_key(self, event) -> None:
         if not self._cursor_on or self._data is None:

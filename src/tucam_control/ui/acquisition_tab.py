@@ -139,8 +139,60 @@ class ImageLabel(QLabel):
                 self._cursor_enabled = True
                 self.setFocus()
                 self.update()
+                return
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        try:
+            if not self._cursor_enabled or self._raw_array is None:
+                super().keyPressEvent(event)
+                return
+            moved = False
+            if event.key() == Qt.Key.Key_Left:
+                self._cursor_image_x = max(0, self._cursor_image_x - 1)
+                moved = True
+            elif event.key() == Qt.Key.Key_Right:
+                self._cursor_image_x = min(self._img_w - 1, self._cursor_image_x + 1)
+                moved = True
+            elif event.key() == Qt.Key.Key_Up:
+                self._cursor_image_y = max(0, self._cursor_image_y - 1)
+                moved = True
+            elif event.key() == Qt.Key.Key_Down:
+                self._cursor_image_y = min(self._img_h - 1, self._cursor_image_y + 1)
+                moved = True
+            elif event.key() == Qt.Key.Key_Escape:
+                self._cursor_enabled = False
+            else:
+                super().keyPressEvent(event)
+                return
+            if moved:
+                self.update()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if not self._cursor_enabled or self._raw_array is None:
+            return
+        try:
+            wx, wy = self._image_to_widget(self._cursor_image_x, self._cursor_image_y)
+            painter = QPainter(self)
+            pen = QPen(QColor(255, 0, 0), 1)
+            painter.setPen(pen)
+            painter.drawLine(wx - 8, wy, wx + 8, wy)
+            painter.drawLine(wx, wy - 8, wx, wy + 8)
+            painter.fillRect(wx + 10, wy + 4, 220, 20, QColor(0, 0, 0, 180))
+            painter.setPen(QColor(0, 255, 0))
+            painter.setFont(QFont("Consolas", 9))
+            painter.drawText(wx + 14, wy + 18, self._get_value_str())
+            painter.end()
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not self._cursor_enabled or self._raw_array is None:

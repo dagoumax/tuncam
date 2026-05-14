@@ -46,9 +46,17 @@ from tucam_control.ui.main_window import MainWindow
 
 
 def main() -> None:
+    import traceback
     app = QApplication(sys.argv)
     app.setApplicationName("Dhyana-95-V2 Camera Control")
     app.setOrganizationName("TucamControl")
+
+    # Global exception hook for debugging
+    _old_hook = sys.excepthook
+    def _hook(etype, value, tb):
+        traceback.print_exception(etype, value, tb)
+        _old_hook(etype, value, tb)
+    sys.excepthook = _hook
 
     window = MainWindow()
     window.show()
