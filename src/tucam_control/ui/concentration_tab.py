@@ -275,7 +275,7 @@ class ConcentrationTab(QWidget):
         else:
             self._ax.set_xlabel("帧序号 / Frame Index")
 
-        if total_pts > _WINDOW_SIZE:
+        if total_pts > WINDOW_SIZE:
             if is_datetime:
                 all_t = []
                 if not is_all_groups:
@@ -287,10 +287,10 @@ class ConcentrationTab(QWidget):
                             _, times = self._history[lbl][selected_gas]
                             all_t.extend(times)
                 all_t.sort()
-                if len(all_t) >= _WINDOW_SIZE:
-                    self._ax.set_xlim(left=all_t[-_WINDOW_SIZE], right=all_t[-1])
+                if len(all_t) >= WINDOW_SIZE:
+                    self._ax.set_xlim(left=all_t[-WINDOW_SIZE], right=all_t[-1])
             else:
-                self._ax.set_xlim(left=max(0, total_pts - _WINDOW_SIZE), right=total_pts - 0.5)
+                self._ax.set_xlim(left=max(0, total_pts - WINDOW_SIZE), right=total_pts - 0.5)
 
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
