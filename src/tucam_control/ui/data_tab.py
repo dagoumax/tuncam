@@ -3,10 +3,7 @@
 
 from __future__ import annotations
 
-import matplotlib
-import matplotlib.font_manager as fm
 import numpy as np
-from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal, Slot
@@ -21,24 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ._mpl_style import COLORS, fix_tick_labels
 from ..calibration import apply_calibration, pixel_from_raman
-
-_CJK_FONTS = ["Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Micro Hei", "Noto Sans CJK SC"]
-_available = {f.name for f in fm.fontManager.ttflist}
-_cjk_font = None
-for _f in _CJK_FONTS:
-    if _f in _available:
-        _cjk_font = _f
-        break
-if _cjk_font:
-    matplotlib.rcParams["font.family"] = ["sans-serif"]
-    matplotlib.rcParams["font.sans-serif"] = [_cjk_font, "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
-
-_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-]
 
 
 class DataTab(QWidget):
@@ -259,8 +240,7 @@ class DataTab(QWidget):
         if len(handles) > 0:
             self._ax.legend(loc="upper right", fontsize=8)
         self._ax.grid(True, alpha=0.3)
-        for label in self._ax.get_xticklabels() + self._ax.get_yticklabels():
-            label.set_family("DejaVu Sans")
+        fix_tick_labels(self._ax)
 
         self._shape_label.setText(
             f"{self._data.shape[0]} groups x {self._data.shape[1]} cols"
@@ -307,7 +287,7 @@ class DataTab(QWidget):
             ys = [self._data[i, x] for i in range(self._data.shape[0])]
             self._ax.axvline(x=x_val, color="red", linewidth=0.8, alpha=0.6)
             for i, y in enumerate(ys):
-                color = _COLORS[i % len(_COLORS)]
+                color = COLORS[i % len(_COLORS)]
                 self._ax.axhline(y=y, color=color, linewidth=0.5, alpha=0.3, linestyle="--")
             text_lines = [f"{x_str}:"]
             for i, y in enumerate(ys):
@@ -330,12 +310,12 @@ class DataTab(QWidget):
         label = self._row_labels[idx] if idx < len(self._row_labels) else f"组 {idx + 1}"
         spectrum = self._data[idx]
         x = self._x_axis_values(len(spectrum))
-        self._ax.plot(x, spectrum, color=_COLORS[0], linewidth=0.8, label=f"{label} (data)")
+        self._ax.plot(x, spectrum, color=COLORS[0], linewidth=0.8, label=f"{label} (data)")
 
         if show_baseline and self._baseline is not None and idx < self._baseline.shape[0]:
             self._ax.plot(
                 x, self._baseline[idx],
-                color=_COLORS[1], linewidth=1.2, linestyle="--", label=f"{label} (baseline)",
+                color=COLORS[1], linewidth=1.2, linestyle="--", label=f"{label} (baseline)",
             )
 
         self._ax.set_title(label)
@@ -344,7 +324,7 @@ class DataTab(QWidget):
         n_groups = self._data.shape[0]
         for i in range(n_groups):
             label = self._row_labels[i] if i < len(self._row_labels) else f"组 {i + 1}"
-            color = _COLORS[i % len(_COLORS)]
+            color = COLORS[i % len(_COLORS)]
             spectrum = self._data[i]
             x = self._x_axis_values(len(spectrum))
             self._ax.plot(x, spectrum, color=color, linewidth=0.8, label=f"{label}")

@@ -8,9 +8,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 
-import matplotlib
 import matplotlib.dates as mdates
-import matplotlib.font_manager as fm
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -30,24 +28,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
-_CJK_FONTS = ["Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Micro Hei", "Noto Sans CJK SC"]
-_available = {f.name for f in fm.fontManager.ttflist}
-_cjk_font = None
-for _f in _CJK_FONTS:
-    if _f in _available:
-        _cjk_font = _f
-        break
-if _cjk_font:
-    matplotlib.rcParams["font.family"] = ["sans-serif"]
-    matplotlib.rcParams["font.sans-serif"] = [_cjk_font, "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
-
-_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-]
-
-_WINDOW_SIZE = 100
+from ._mpl_style import COLORS, WINDOW_SIZE, fix_tick_labels
 
 
 class ConcentrationTab(QWidget):
@@ -249,7 +230,7 @@ class ConcentrationTab(QWidget):
                         continue
                     if not is_datetime and len(times) > 0:
                         is_datetime = isinstance(times[0], datetime)
-                    color = _COLORS[color_idx % len(_COLORS)]
+                    color = COLORS[color_idx % len(_COLORS)]
                     color_idx += 1
                     line_label = f"{lbl} {name}"
                     self._ax.plot(times, vals, color=color, linewidth=0.8,
@@ -280,7 +261,7 @@ class ConcentrationTab(QWidget):
                     continue
                 if not is_datetime and len(times) > 0:
                     is_datetime = isinstance(times[0], datetime)
-                color = _COLORS[i % len(_COLORS)]
+                color = COLORS[i % len(_COLORS)]
                 self._ax.plot(times, vals, color=color, linewidth=1.0,
                               label=lbl, marker=".", markersize=2)
                 total_pts += len(vals)
@@ -313,8 +294,7 @@ class ConcentrationTab(QWidget):
 
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
-        for label in self._ax.get_xticklabels() + self._ax.get_yticklabels():
-            label.set_family("DejaVu Sans")
+        fix_tick_labels(self._ax)
         has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
         show_legend = has_artists and (
             is_all_groups or selected_gas != "all" or len(self._gas_names) <= 5
@@ -342,7 +322,7 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[name]
                 if len(vals) == 0:
                     continue
-                self._ax.plot(times, vals, color=_COLORS[i % len(_COLORS)],
+                self._ax.plot(times, vals, color=COLORS[i % len(_COLORS)],
                               linewidth=1.0, label=name, marker=".", markersize=2)
             self._ax.set_title(f"浓度变化 [{glabel}] / All Gases")
         else:
@@ -350,7 +330,7 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[selected_gas]
                 if len(vals) > 0:
                     idx = self._gas_names.index(selected_gas) if selected_gas in self._gas_names else 0
-                    color = _COLORS[idx % len(_COLORS)]
+                    color = COLORS[idx % len(_COLORS)]
                     self._ax.plot(times, vals, color=color, linewidth=1.2,
                                   label=selected_gas, marker=".", markersize=2)
             self._ax.set_title(f"浓度变化 [{glabel}] / {selected_gas}")
