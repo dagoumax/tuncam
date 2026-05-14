@@ -192,5 +192,5 @@ class GasAnalyzer:
         return [
             GasConfig("O2", 572, 15, 1.0, raman_shift=1558),
             GasConfig("N2", 1015, 15, 1.0, raman_shift=2333),
-            GasConfig("CO2", 488, 15, 1.0, raman_shift=0),
+            GasConfig("CO2", 488, 15, 1.0, raman_shift=1387),
         ]

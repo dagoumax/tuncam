@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..calibration import apply_calibration, detect_peaks, fit_calibration, CalibrationPoint
+from ..calibration import apply_calibration, pixel_from_raman
 
 _CJK_FONTS = ["Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Micro Hei", "Noto Sans CJK SC"]
 _available = {f.name for f in fm.fontManager.ttflist}
@@ -157,7 +157,7 @@ class DataTab(QWidget):
         return pixels.astype(np.float64)
 
     def _x_axis_label(self) -> str:
-        return "拉曼位移 / Raman Shift (cm⁻¹)" if self._calib_coeffs is not None else "列号 / Column Index"
+        return "拉曼位移 / Raman Shift ($cm^{-1}$)" if self._calib_coeffs is not None else "列号 / Column Index"
 
     # ------------------------------------------------------------------
     # Cursor
@@ -183,7 +183,12 @@ class DataTab(QWidget):
             self._redraw()
             return
         if event.button == MouseButton.LEFT:
-            self._cursor_idx = max(0, min(int(round(event.xdata)), self._data.shape[1] - 1))
+            n_data = self._data.shape[1]
+            if self._calib_coeffs is not None:
+                px = pixel_from_raman(float(event.xdata), self._calib_coeffs)
+                self._cursor_idx = max(0, min(int(round(px)), n_data - 1))
+            else:
+                self._cursor_idx = max(0, min(int(round(event.xdata)), n_data - 1))
             self._cursor_on = True
             self._canvas.setFocus()
             self._redraw()
@@ -259,6 +264,8 @@ class DataTab(QWidget):
         if len(handles) > 0:
             self._ax.legend(loc="upper right", fontsize=8)
         self._ax.grid(True, alpha=0.3)
+        for label in self._ax.get_xticklabels() + self._ax.get_yticklabels():
+            label.set_family("DejaVu Sans")
 
         self._shape_label.setText(
             f"{self._data.shape[0]} groups x {self._data.shape[1]} cols"
@@ -279,7 +286,7 @@ class DataTab(QWidget):
             return
 
         x_val = self._x_axis_values(n_data)[x]
-        x_unit = "cm⁻¹" if self._calib_coeffs is not None else "列"
+        x_unit = "cm-1" if self._calib_coeffs is not None else "列"
         x_str = f"{x_val:.1f} {x_unit}"
 
         mode = self._mode_combo.currentData()

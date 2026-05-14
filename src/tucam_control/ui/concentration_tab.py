@@ -313,6 +313,8 @@ class ConcentrationTab(QWidget):
 
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
+        for label in self._ax.get_xticklabels() + self._ax.get_yticklabels():
+            label.set_family("DejaVu Sans")
         has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
         show_legend = has_artists and (
             is_all_groups or selected_gas != "all" or len(self._gas_names) <= 5
