@@ -152,12 +152,10 @@ class DataTab(QWidget):
 
     def _x_axis_values(self, n_cols: int) -> np.ndarray:
         pixels = np.arange(n_cols)
-        if self._calib_coeffs is not None:
-            return apply_calibration(pixels, self._calib_coeffs)
-        return pixels.astype(np.float64)
+        return apply_calibration(pixels, self._calib_coeffs)
 
     def _x_axis_label(self) -> str:
-        return "拉曼位移 / Raman Shift ($cm^{-1}$)" if self._calib_coeffs is not None else "列号 / Column Index"
+        return "拉曼位移 / Raman Shift ($cm^{-1}$)"
 
     # ------------------------------------------------------------------
     # Cursor
@@ -184,11 +182,8 @@ class DataTab(QWidget):
             return
         if event.button == MouseButton.LEFT:
             n_data = self._data.shape[1]
-            if self._calib_coeffs is not None:
-                px = pixel_from_raman(float(event.xdata), self._calib_coeffs)
-                self._cursor_idx = max(0, min(int(round(px)), n_data - 1))
-            else:
-                self._cursor_idx = max(0, min(int(round(event.xdata)), n_data - 1))
+            px = pixel_from_raman(float(event.xdata), self._calib_coeffs)
+            self._cursor_idx = max(0, min(int(round(px)), n_data - 1))
             self._cursor_on = True
             self._canvas.setFocus()
             self._redraw()
@@ -259,7 +254,7 @@ class DataTab(QWidget):
             self._plot_all(show_bl)
 
         self._ax.set_xlabel(self._x_axis_label())
-        self._ax.set_ylabel("灰度均值 / Mean Grayscale")
+        self._ax.set_ylabel("强度 / Intensity")
         handles, labels = self._ax.get_legend_handles_labels()
         if len(handles) > 0:
             self._ax.legend(loc="upper right", fontsize=8)
@@ -286,8 +281,7 @@ class DataTab(QWidget):
             return
 
         x_val = self._x_axis_values(n_data)[x]
-        x_unit = "cm-1" if self._calib_coeffs is not None else "列"
-        x_str = f"{x_val:.1f} {x_unit}"
+        x_str = f"{x_val:.1f} $cm^{{-1}}$"
 
         mode = self._mode_combo.currentData()
 
