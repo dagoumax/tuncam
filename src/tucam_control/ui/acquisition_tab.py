@@ -127,22 +127,20 @@ class ImageLabel(QLabel):
             pass
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        try:
-            if event.button() == Qt.MouseButton.RightButton:
-                self._cursor_enabled = False
-                self.update()
-                return
-            if event.button() == Qt.MouseButton.LeftButton and self._raw_array is not None:
-                ix, iy = self._widget_to_image(int(event.position().x()), int(event.position().y()))
-                self._cursor_image_x = ix
-                self._cursor_image_y = iy
-                self._cursor_enabled = True
-                self.setFocus()
-                self.update()
-                return
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        if event.button() == Qt.MouseButton.RightButton:
+            self._cursor_enabled = False
+            self.update()
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._raw_array is not None:
+            ix, iy = self._widget_to_image(int(event.position().x()), int(event.position().y()))
+            self._cursor_image_x = ix
+            self._cursor_image_y = iy
+            self._cursor_enabled = True
+            self.setFocus()
+            self.update()
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

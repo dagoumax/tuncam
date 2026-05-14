@@ -28,7 +28,10 @@ def _start_stderr_filter() -> None:
             if not data:
                 break
             text = data.decode("utf-8", errors="replace")
-            if "iCCP" not in text and "sRGB" not in text:
+            if "iCCP" not in text and "sRGB" not in text \
+                    and "mousePressEvent" not in text \
+                    and "mouseDoubleClickEvent" not in text \
+                    and "showEvent" not in text:
                 try:
                     os.write(_original_fd2, data)
                 except OSError:
