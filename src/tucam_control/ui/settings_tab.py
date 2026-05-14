@@ -92,12 +92,14 @@ class SettingsTab(QWidget):
         arpls_form = QFormLayout(arpls_gb)
 
         self._arpls_enable_cb = QCheckBox("启用 / Enable")
+        self._arpls_enable_cb.setChecked(True)
         arpls_form.addRow("", self._arpls_enable_cb)
 
         self._arpls_mode_combo = QComboBox()
         self._arpls_mode_combo.addItem("原始数据 / Raw", "raw")
         self._arpls_mode_combo.addItem("校正后 / Corrected", "corrected")
         self._arpls_mode_combo.addItem("仅基线 / Baseline Only", "baseline")
+        self._arpls_mode_combo.setCurrentIndex(1)
         arpls_form.addRow("输出模式 / Output Mode:", self._arpls_mode_combo)
 
         self._arpls_lam_spin = QDoubleSpinBox()

@@ -172,6 +172,8 @@ class ConcentrationTab(QWidget):
         self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
 
     def _redraw(self) -> None:
+        if not self.isVisible():
+            return
         self._ax.clear()
 
         selected = self._gas_combo.currentData()

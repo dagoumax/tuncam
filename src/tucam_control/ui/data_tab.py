@@ -189,6 +189,8 @@ class DataTab(QWidget):
         self._redraw()
 
     def _redraw(self) -> None:
+        if not self.isVisible():
+            return
         self._ax.clear()
 
         if self._data is None:
@@ -239,6 +241,7 @@ class DataTab(QWidget):
                 g = 0
             yy = self._data[g, x]
             self._ax.axvline(x=x, color="red", linewidth=0.8, alpha=0.6)
+            self._ax.axhline(y=yy, color="red", linewidth=0.6, alpha=0.4, linestyle="--")
             self._ax.plot(x, yy, "ro", markersize=5)
             self._ax.annotate(
                 f"列 {x}  =  {yy:.1f}",
@@ -249,12 +252,15 @@ class DataTab(QWidget):
                 verticalalignment="top",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
             )
-            self._cursor_label.setText(f"列 {x}, 值 {yy:.1f}  (方向键移动, 右键取消)")
+            self._cursor_label.setText(f"列 {x}, 值 {yy:.1f}  (←→移动, 右键取消)")
         else:
             ys = [self._data[i, x] for i in range(self._data.shape[0])]
             ymin = self._data.min()
             ymax = self._data.max()
             self._ax.axvline(x=x, color="red", linewidth=0.8, alpha=0.6)
+            for i, y in enumerate(ys):
+                color = _COLORS[i % len(_COLORS)]
+                self._ax.axhline(y=y, color=color, linewidth=0.5, alpha=0.3, linestyle="--")
             text_lines = [f"列 {x}:"]
             for i, y in enumerate(ys):
                 label = self._row_labels[i] if i < len(self._row_labels) else f"G{i+1}"
@@ -268,7 +274,7 @@ class DataTab(QWidget):
                 verticalalignment="top",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
             )
-            self._cursor_label.setText(f"列 {x}  (方向键移动, 右键取消)")
+            self._cursor_label.setText(f"列 {x}  (←→移动, 右键取消)")
 
     def _plot_single(self, idx: int, show_baseline: bool) -> None:
         if idx >= self._data.shape[0]:
