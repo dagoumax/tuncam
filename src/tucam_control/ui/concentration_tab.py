@@ -365,15 +365,26 @@ class ConcentrationTab(QWidget):
         self.clear_history()
 
     def _on_export(self) -> None:
-        group_data = self._selected_group_data()
-        if not group_data:
-            QMessageBox.information(self, "导出 / Export", "没有数据可导出。")
-            return
+        glabel = self._group_combo.currentData()
+        is_all_groups = (glabel == "__all__")
+
+        if is_all_groups:
+            if not self._history:
+                QMessageBox.information(self, "导出 / Export", "没有数据可导出。")
+                return
+        else:
+            group_data = self._selected_group_data()
+            if not group_data:
+                QMessageBox.information(self, "导出 / Export", "没有数据可导出。")
+                return
+
+        ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
+        default_name = f"concentration_{ts}.csv"
 
         path, _ = QFileDialog.getSaveFileName(
             self,
             "导出浓度数据 / Export Concentration Data",
-            self._last_export_dir or "concentration.csv",
+            self._last_export_dir or default_name,
             "CSV (*.csv)",
         )
         if not path:
@@ -382,40 +393,55 @@ class ConcentrationTab(QWidget):
 
         try:
             from datetime import datetime as dt_type
-            gas_names = sorted(group_data.keys())
-            is_datetime = False
-            for _, (_, times) in group_data.items():
-                if len(times) > 0:
-                    is_datetime = isinstance(times[0], dt_type)
-                    break
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f)
-                header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-                header += gas_names
-                writer.writerow(header)
-
-                max_len = max((len(vals) for vals, _ in group_data.values()), default=0)
-                for i in range(max_len):
-                    row = []
-                    t_val = ""
-                    for name in gas_names:
-                        if name in group_data:
-                            _, times = group_data[name]
-                            if i < len(times):
-                                if is_datetime:
-                                    t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
-                                else:
-                                    t_val = str(int(times[i]))
-                                break
-                    row.append(t_val)
-                    for name in gas_names:
-                        if name in group_data:
-                            vals, _ = group_data[name]
-                            row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
-                        else:
-                            row.append("")
-                    writer.writerow(row)
+            gas_names = sorted(self._gas_names)
+            if not is_all_groups:
+                group_data = self._selected_group_data()
+                self._write_csv(path, group_data, gas_names)
+            else:
+                if not self._group_labels or not self._history:
+                    QMessageBox.information(self, "导出", "没有数据。")
+                    return
+                first = self._group_labels[0]
+                if first not in self._history:
+                    QMessageBox.information(self, "导出", "没有数据。")
+                    return
+                self._write_csv(path, self._history[first], gas_names)
 
             QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
+
+    def _write_csv(self, path: str, group_data: dict, gas_names: list[str]) -> None:
+        from datetime import datetime as dt_type
+        is_datetime = False
+        for _, (_, times) in group_data.items():
+            if len(times) > 0:
+                is_datetime = isinstance(times[0], dt_type)
+                break
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
+            header += gas_names
+            writer.writerow(header)
+
+            max_len = max((len(vals) for vals, _ in group_data.values()), default=0)
+            for i in range(max_len):
+                row = []
+                t_val = ""
+                for name in gas_names:
+                    if name in group_data:
+                        _, times = group_data[name]
+                        if i < len(times):
+                            if is_datetime:
+                                t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                            else:
+                                t_val = str(int(times[i]))
+                            break
+                row.append(t_val)
+                for name in gas_names:
+                    if name in group_data:
+                        vals, _ = group_data[name]
+                        row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
+                    else:
+                        row.append("")
+                writer.writerow(row)
