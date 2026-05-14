@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..camera import CameraController, CameraInfo
 from ..data_processor import DataProcessor
-from ..gas_analyzer import GasAnalyzer, GasConfig
+from ..gas_analyzer import GasAnalyzer, GasConfig, GasResult
 from .acquisition_tab import AcquisitionTab
 from .settings_tab import SettingsTab
 from .data_tab import DataTab
@@ -494,11 +494,12 @@ class MainWindow(QMainWindow):
             self._data_tab.display_array(result)
             self._data_tab.set_baseline_data(self._processor.last_baseline)
 
-            # Gas analysis on each row group's spectrum
+            # Gas analysis — average across all row groups
             gas_names = [g.name for g in self._analyzer.gases]
             self._conc_tab.set_gas_names(gas_names)
             if result.shape[0] > 0:
-                g_results = self._analyzer.analyze(result[0])
+                all_results = self._analyzer.analyze_groups(result)
+                g_results = self._average_gas_results(all_results)
                 mode = "index" if self._batch_timer.isActive() else "time"
                 self._conc_tab.add_data_point(g_results, mode=mode)
         except Exception as exc:
@@ -525,13 +526,36 @@ class MainWindow(QMainWindow):
             gas_names = [g.name for g in self._analyzer.gases]
             self._conc_tab.set_gas_names(gas_names)
             if result.shape[0] > 0:
-                g_results = self._analyzer.analyze(result[0])
+                all_results = self._analyzer.analyze_groups(result)
+                g_results = self._average_gas_results(all_results)
                 mode = "index" if self._batch_timer.isActive() else "time"
                 self._conc_tab.add_data_point(g_results, mode=mode)
 
     # ------------------------------------------------------------------
     # Close
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _average_gas_results(all_results: list) -> list:
+        """Average GasResult objects across multiple row groups."""
+        if not all_results:
+            return []
+        result0 = all_results[0]
+        n_groups = len(all_results)
+        return [
+            GasResult(
+                name=r.name,
+                position=r.position,
+                found_col=int(sum(all_results[g][i].found_col for g in range(n_groups)) / n_groups),
+                peak_height=sum(all_results[g][i].peak_height for g in range(n_groups)) / n_groups,
+                peak_area=sum(all_results[g][i].peak_area for g in range(n_groups)) / n_groups,
+                coefficient=r.coefficient,
+                component=sum(all_results[g][i].component for g in range(n_groups)) / n_groups,
+                concentration=sum(all_results[g][i].concentration for g in range(n_groups)) / n_groups,
+                detected=any(all_results[g][i].detected for g in range(n_groups)),
+            )
+            for i, r in enumerate(result0)
+        ]
 
     def closeEvent(self, event) -> None:
         self._refresh_timer.stop()
