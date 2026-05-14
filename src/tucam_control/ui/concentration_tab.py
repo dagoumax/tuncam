@@ -401,15 +401,57 @@ class ConcentrationTab(QWidget):
                 if not self._group_labels or not self._history:
                     QMessageBox.information(self, "导出", "没有数据。")
                     return
-                first = self._group_labels[0]
-                if first not in self._history:
-                    QMessageBox.information(self, "导出", "没有数据。")
-                    return
-                self._write_csv(path, self._history[first], gas_names)
+                self._write_csv_all_groups(path, gas_names)
 
             QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
+
+    def _write_csv_all_groups(self, path: str, gas_names: list[str]) -> None:
+        """Export all groups: columns = Time + GasName(GroupLabel) for each."""
+        from datetime import datetime as dt_type
+        is_datetime = False
+        for lbl in self._group_labels:
+            if lbl not in self._history:
+                continue
+            for _, (_, times) in self._history[lbl].items():
+                if len(times) > 0:
+                    is_datetime = isinstance(times[0], dt_type)
+                    break
+
+        columns: list[tuple[str, str, str]] = []  # (gas_name, group_label, header)
+        for gas in gas_names:
+            for lbl in self._group_labels:
+                if lbl in self._history and gas in self._history[lbl]:
+                    columns.append((gas, lbl, f"{gas}({lbl})"))
+
+        max_len = 0
+        for gas, lbl, _ in columns:
+            vals, _ = self._history[lbl][gas]
+            max_len = max(max_len, len(vals))
+
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
+            header += [h for _, _, h in columns]
+            writer.writerow(header)
+
+            for i in range(max_len):
+                row = []
+                t_val = ""
+                for gas, lbl, _ in columns:
+                    _, times = self._history[lbl][gas]
+                    if i < len(times):
+                        if is_datetime:
+                            t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            t_val = str(int(times[i]))
+                        break
+                row.append(t_val)
+                for gas, lbl, _ in columns:
+                    vals, _ = self._history[lbl][gas]
+                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
+                writer.writerow(row)
 
     def _write_csv(self, path: str, group_data: dict, gas_names: list[str]) -> None:
         from datetime import datetime as dt_type
