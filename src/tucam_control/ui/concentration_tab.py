@@ -214,7 +214,6 @@ class ConcentrationTab(QWidget):
         is_all_groups = (glabel == "__all__")
 
         if is_all_groups and selected_gas == "all":
-            # All groups + all gases: each line labeled "行X-Y GasName"
             is_datetime = False
             total_pts = 0
             color_idx = 0
@@ -238,16 +237,13 @@ class ConcentrationTab(QWidget):
                     total_pts += len(vals)
             self._ax.set_title("浓度变化 [全部行组] / All Groups & Gases")
             self._pt_label.setText(f"数据点 / Points: {total_pts}")
-
-        if not is_all_groups:
-            # Single group mode
+        elif not is_all_groups:
             group_data = self._selected_group_data()
             if not group_data:
                 self._canvas.draw_idle()
                 return
             is_datetime, total_pts = self._plot_group_data(group_data, selected_gas, glabel)
         else:
-            # All groups, single gas mode
             is_datetime = False
             total_pts = 0
             for i, lbl in enumerate(self._group_labels):

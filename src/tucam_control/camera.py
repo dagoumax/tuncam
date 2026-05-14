@@ -4,7 +4,6 @@ Camera acquisition controller for Dhyana-95-V2 via TUCam SDK.
 """
 
 import ctypes
-import time
 from ctypes import (
     byref,
     c_char_p,
@@ -22,7 +21,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .TUCam import (
-    TUCAM_CAPA_ATTR,
     TUCAM_CAPTURE_MODES,
     TUCAM_FRAME,
     TUCAM_FILE_SAVE,

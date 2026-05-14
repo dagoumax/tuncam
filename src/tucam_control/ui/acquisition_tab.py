@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal, Slot, QPoint, QRect
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import (
     QImage,
     QPainter,

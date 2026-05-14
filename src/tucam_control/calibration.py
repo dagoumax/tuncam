@@ -72,7 +72,10 @@ def pixel_from_raman(raman_shift: float, coeffs: np.ndarray | None) -> int:
         return int(raman_shift)
     if len(coeffs) == 2:
         # Linear: p = (raman - b) / a
-        return int(round((raman_shift - coeffs[1]) / coeffs[0]))
+        a, b = coeffs[0], coeffs[1]
+        if abs(a) < 1e-15:
+            return int(raman_shift)
+        return int(round((raman_shift - b) / a))
     # Higher order: solve coeffs[0]*p^n + ... + coeffs[-2]*p + coeffs[-1] - raman = 0
     poly = np.array(coeffs, copy=True)
     poly[-1] -= raman_shift

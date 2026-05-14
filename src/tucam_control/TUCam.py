@@ -4,7 +4,6 @@ TUCam SDK Python Wrapper — adapted for tucam_control project.
 Loads TUCam.dll from the project's lib/x64/ directory.
 """
 
-import ctypes
 import os
 from ctypes import *
 from enum import Enum

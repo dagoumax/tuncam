@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
+from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal, Slot
@@ -90,7 +91,6 @@ class DataTab(QWidget):
         self._canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         layout.addWidget(self._canvas, 1)
 
-        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
         self._toolbar = NavigationToolbar2QT(self._canvas, self)
         self._toolbar.setMaximumHeight(30)
         layout.addWidget(self._toolbar)

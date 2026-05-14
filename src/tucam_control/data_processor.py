@@ -4,7 +4,6 @@ Data processor for splitting rows, merging columns, and baseline correction (arP
 """
 
 import numpy as np
-from scipy import sparse
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 

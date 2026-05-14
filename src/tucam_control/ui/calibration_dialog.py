@@ -160,9 +160,10 @@ class CalibrationDialog(QDialog):
                 continue
             try:
                 px = int(pixel_item.text().strip())
-                rs = float(shift_item.text().strip())
-                if rs == 0.0 and shift_item.text().strip() == "":
+                shift_text = shift_item.text().strip()
+                if not shift_text:
                     continue
+                rs = float(shift_text)
                 points.append(CalibrationPoint(pixel=px, raman_shift=rs))
             except ValueError:
                 continue

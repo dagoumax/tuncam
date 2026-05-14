@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
     QFileDialog,
 )
 
-from ..camera import CameraController, CameraInfo
+from ..camera import CameraController
 from ..data_processor import DataProcessor
-from ..gas_analyzer import GasAnalyzer, GasConfig
+from ..gas_analyzer import GasAnalyzer
 from .acquisition_tab import AcquisitionTab
 from .settings_tab import SettingsTab
 from .data_tab import DataTab
@@ -250,7 +250,6 @@ class MainWindow(QMainWindow):
 
         self._batch_idx = 0
         self._conc_tab.clear_history()
-        self._conc_tab._mode = "index"
         self._acq_tab.set_batch_state(True)
         self._batch_timer.start()
         self.status_changed.emit(f"批量测试: {len(self._batch_images)} 张图像")
