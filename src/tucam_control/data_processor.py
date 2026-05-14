@@ -274,6 +274,7 @@ class DataProcessor:
         if not text:
             return []
         normalized = text.replace("\n", ",").replace("\r", ",").replace(" ", ",")
+        normalized = normalized.replace("，", ",")   # Chinese comma support
         groups: list[tuple[int, int]] = []
         for part in normalized.split(","):
             part = part.strip()

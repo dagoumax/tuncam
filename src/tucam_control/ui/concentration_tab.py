@@ -186,28 +186,37 @@ class ConcentrationTab(QWidget):
         self._ax.clear()
 
         selected = self._gas_combo.currentData()
-        is_time_mode = self._mode == "time"
+
+        # Detect whether time data is datetime or float
+        is_datetime = False
+        for _, times in self._history.values():
+            if len(times) > 0:
+                from datetime import datetime
+                is_datetime = isinstance(times[0], datetime)
+                break
 
         if selected == "all":
             for i, name in enumerate(self._gas_names):
                 vals, times = self._history[name]
                 if len(vals) == 0:
                     continue
-                self._ax.plot(times, vals, color=_COLORS[i % len(_COLORS)],
+                t = times if is_datetime else [float(v) for v in times]
+                self._ax.plot(t, vals, color=_COLORS[i % len(_COLORS)],
                               linewidth=1.0, label=name, marker=".", markersize=2)
             self._ax.set_title("所有气体浓度变化 / All Gas Concentrations")
         elif selected in self._gas_names:
             vals, times = self._history[selected]
             if len(vals) > 0:
                 color = _COLORS[self._gas_names.index(selected) % len(_COLORS)]
-                self._ax.plot(times, vals, color=color, linewidth=1.2,
+                t = times if is_datetime else [float(v) for v in times]
+                self._ax.plot(t, vals, color=color, linewidth=1.2,
                               label=selected, marker=".", markersize=2)
             self._ax.set_title(f"气体浓度变化 / {selected} Concentration")
 
         total_pts = sum(len(v) for v, _ in self._history.values())
         self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
-        if is_time_mode:
+        if is_datetime:
             self._ax.set_xlabel("系统时间 / System Time")
             self._ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
             self._fig.autofmt_xdate(rotation=30)
@@ -215,7 +224,7 @@ class ConcentrationTab(QWidget):
             self._ax.set_xlabel("帧序号 / Frame Index")
 
         if total_pts > _WINDOW_SIZE:
-            if is_time_mode:
+            if is_datetime:
                 all_times = []
                 for _, times in self._history.values():
                     all_times.extend(times)
@@ -259,31 +268,34 @@ class ConcentrationTab(QWidget):
         self._last_export_dir = path
 
         try:
-            is_time_mode = self._mode == "time"
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f)
-                header = ["时间 / Time" if is_time_mode else "帧序号 / Index"]
-                header += self._gas_names
-                writer.writerow(header)
+            from datetime import datetime
+            is_datetime = False
+            for _, times in self._history.values():
+                if len(times) > 0:
+                    is_datetime = isinstance(times[0], datetime)
+                    break
+            header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
+            header += self._gas_names
+            writer.writerow(header)
 
-                max_len = max((len(vals) for vals, _ in self._history.values()), default=0)
-                for i in range(max_len):
-                    row = []
-                    # Grab time from the first gas that has this index
-                    t_val = ""
-                    for name in self._gas_names:
-                        vals, times = self._history[name]
-                        if i < len(times):
-                            if is_time_mode:
-                                t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
-                            else:
-                                t_val = str(int(times[i]))
-                            break
-                    row.append(t_val)
-                    for name in self._gas_names:
-                        vals, _ = self._history[name]
-                        row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
-                    writer.writerow(row)
+            max_len = max((len(vals) for vals, _ in self._history.values()), default=0)
+            for i in range(max_len):
+                row = []
+                # Grab time from the first gas that has this index
+                t_val = ""
+                for name in self._gas_names:
+                    vals, times = self._history[name]
+                    if i < len(times):
+                        if is_datetime:
+                            t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            t_val = str(int(times[i]))
+                        break
+                row.append(t_val)
+                for name in self._gas_names:
+                    vals, _ = self._history[name]
+                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
+                writer.writerow(row)
 
             QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
         except Exception as exc:
