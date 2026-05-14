@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer.start()
 
         self._capture_timer = QTimer(self)
-        self._capture_timer.setInterval(50)
+        self._capture_timer.setInterval(200)
         self._capture_timer.timeout.connect(self._on_capture_poll)
 
         self._batch_images: list[tuple[str, np.ndarray]] = []
@@ -365,7 +365,8 @@ class MainWindow(QMainWindow):
     def _on_capture_poll(self) -> None:
         if not self._camera.is_capturing:
             return
-        arr = self._camera.wait_for_frame(timeout_ms=500)
+        timeout = max(1000, int(self._settings.get("exposure_time_ms", 1000)) + 500)
+        arr = self._camera.wait_for_frame(timeout_ms=timeout)
         if arr is not None:
             self._acq_tab.display_frame(arr)
         else:
