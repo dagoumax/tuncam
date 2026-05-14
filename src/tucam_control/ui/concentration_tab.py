@@ -199,7 +199,8 @@ class ConcentrationTab(QWidget):
         self._ax.set_xlabel(xlabel)
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
-        if selected != "all" or len(self._gas_names) <= 5:
+        has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
+        if has_artists and (selected != "all" or len(self._gas_names) <= 5):
             self._ax.legend(loc="upper right", fontsize=8)
         self._canvas.draw_idle()
 

@@ -73,12 +73,17 @@ class DataTab(QWidget):
         self._show_baseline_cb.stateChanged.connect(self._redraw)
         ctrl.addWidget(self._show_baseline_cb)
 
+        self._cursor_toggle_cb = QCheckBox("光标 / Cursor")
+        self._cursor_toggle_cb.setChecked(False)
+        self._cursor_toggle_cb.stateChanged.connect(self._on_cursor_toggle)
+        ctrl.addWidget(self._cursor_toggle_cb)
+
         ctrl.addWidget(QLabel("    "))
 
         self._shape_label = QLabel("Shape: --")
         ctrl.addWidget(self._shape_label)
 
-        self._cursor_label = QLabel("光标: 左键定位 / 右键取消 / 方向键移动")
+        self._cursor_label = QLabel("光标: 勾选「光标」后左键定位 / 右键取消 / ←→移动")
         self._cursor_label.setStyleSheet("color: #aaa;")
         ctrl.addWidget(self._cursor_label)
 
@@ -120,12 +125,23 @@ class DataTab(QWidget):
     # Cursor
     # ------------------------------------------------------------------
 
+    def _on_cursor_toggle(self) -> None:
+        if not self._cursor_toggle_cb.isChecked():
+            self._cursor_on = False
+        self._redraw()
+
     def _on_click(self, event) -> None:
         if event.inaxes != self._ax or self._data is None:
             return
+        # Don't place cursor when zoom/pan is active
+        if self._toolbar.mode != "":
+            return
+        # Must have cursor mode enabled
+        if not self._cursor_toggle_cb.isChecked():
+            return
         if event.button == MouseButton.RIGHT:
             self._cursor_on = False
-            self._cursor_label.setText("光标: 左键定位 / 右键取消 / 方向键移动")
+            self._cursor_label.setText("光标: 已关闭 / Cursor off")
             self._redraw()
             return
         if event.button == MouseButton.LEFT:
@@ -192,7 +208,9 @@ class DataTab(QWidget):
 
         self._ax.set_xlabel("列号 / Column Index")
         self._ax.set_ylabel("灰度均值 / Mean Grayscale")
-        self._ax.legend(loc="upper right", fontsize=8)
+        handles, labels = self._ax.get_legend_handles_labels()
+        if len(handles) > 0:
+            self._ax.legend(loc="upper right", fontsize=8)
         self._ax.grid(True, alpha=0.3)
 
         self._shape_label.setText(
@@ -205,7 +223,7 @@ class DataTab(QWidget):
 
     def _draw_cursor(self) -> None:
         if not self._cursor_on or self._data is None:
-            self._cursor_label.setText("光标: 左键定位 / 右键取消 / 方向键移动")
+            self._cursor_label.setText("光标: 已关闭 / Cursor off")
             return
 
         x = self._cursor_idx
@@ -220,18 +238,16 @@ class DataTab(QWidget):
             if g is None or g < 0:
                 g = 0
             yy = self._data[g, x]
-            ymin = self._data[g].min()
-            ymax = self._data[g].max()
             self._ax.axvline(x=x, color="red", linewidth=0.8, alpha=0.6)
             self._ax.plot(x, yy, "ro", markersize=5)
             self._ax.annotate(
-                f"({x}, {yy:.1f})",
-                xy=(x, yy),
-                xytext=(8, 8),
-                textcoords="offset points",
+                f"列 {x}  =  {yy:.1f}",
+                xy=(0.02, 0.96),
+                xycoords="axes fraction",
                 color="red",
                 fontsize=9,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8),
+                verticalalignment="top",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
             )
             self._cursor_label.setText(f"列 {x}, 值 {yy:.1f}  (方向键移动, 右键取消)")
         else:
@@ -245,11 +261,11 @@ class DataTab(QWidget):
                 text_lines.append(f"  {label}: {y:.1f}")
             self._ax.annotate(
                 "\n".join(text_lines),
-                xy=(x, ymax),
-                xytext=(12, -12),
-                textcoords="offset points",
+                xy=(0.02, 0.96),
+                xycoords="axes fraction",
                 color="red",
                 fontsize=8,
+                verticalalignment="top",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
             )
             self._cursor_label.setText(f"列 {x}  (方向键移动, 右键取消)")
