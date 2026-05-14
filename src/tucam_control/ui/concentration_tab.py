@@ -139,9 +139,13 @@ class ConcentrationTab(QWidget):
     def set_group_labels(self, labels: list[str]) -> None:
         self._group_labels = labels
         self._group_combo.blockSignals(True)
+        current = self._group_combo.currentData()
         self._group_combo.clear()
+        self._group_combo.addItem("全部行组 / All Groups", "__all__")
         for lbl in labels:
             self._group_combo.addItem(lbl, lbl)
+        if current and self._group_combo.findData(current) >= 0:
+            self._group_combo.setCurrentIndex(self._group_combo.findData(current))
         self._group_combo.blockSignals(False)
 
     def add_data_point(self, all_group_results: list, group_labels: list[str],
@@ -198,6 +202,8 @@ class ConcentrationTab(QWidget):
 
     def _selected_group_data(self) -> dict[str, tuple[list[float], list[object]]]:
         glabel = self._group_combo.currentData()
+        if glabel == "__all__":
+            return {}
         if glabel and glabel in self._history:
             return self._history[glabel]
         return {}
@@ -222,14 +228,77 @@ class ConcentrationTab(QWidget):
         self._dirty = False
         self._ax.clear()
 
-        group_data = self._selected_group_data()
-        if not group_data:
-            self._canvas.draw_idle()
-            return
-
+        glabel = self._group_combo.currentData()
         selected_gas = self._gas_combo.currentData()
+        is_all_groups = (glabel == "__all__")
 
-        # Detect datetime vs float
+        if is_all_groups and selected_gas == "all":
+            # Too many lines — show first group as fallback
+            is_all_groups = False
+            glabel = self._group_labels[0] if self._group_labels else None
+
+        if not is_all_groups:
+            # Single group mode
+            group_data = self._selected_group_data()
+            if not group_data:
+                self._canvas.draw_idle()
+                return
+            is_datetime, total_pts = self._plot_group_data(group_data, selected_gas, glabel)
+        else:
+            # All groups, single gas mode
+            is_datetime = False
+            total_pts = 0
+            for i, lbl in enumerate(self._group_labels):
+                if lbl not in self._history:
+                    continue
+                group_data = self._history[lbl]
+                if selected_gas not in group_data:
+                    continue
+                vals, times = group_data[selected_gas]
+                if len(vals) == 0:
+                    continue
+                if not is_datetime and len(times) > 0:
+                    is_datetime = isinstance(times[0], datetime)
+                color = _COLORS[i % len(_COLORS)]
+                self._ax.plot(times, vals, color=color, linewidth=1.0,
+                              label=lbl, marker=".", markersize=2)
+                total_pts += len(vals)
+            self._ax.set_title(f"浓度变化 [全部行组] / {selected_gas}")
+            self._pt_label.setText(f"数据点 / Points: {total_pts}")
+
+        if is_datetime:
+            self._ax.set_xlabel("系统时间 / System Time")
+            self._ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            self._fig.autofmt_xdate(rotation=30)
+        else:
+            self._ax.set_xlabel("帧序号 / Frame Index")
+
+        if total_pts > _WINDOW_SIZE:
+            if is_datetime:
+                all_t = []
+                if not is_all_groups:
+                    for _, (_, times) in group_data.items():
+                        all_t.extend(times)
+                else:
+                    for lbl in self._group_labels:
+                        if lbl in self._history and selected_gas in self._history[lbl]:
+                            _, times = self._history[lbl][selected_gas]
+                            all_t.extend(times)
+                all_t.sort()
+                if len(all_t) >= _WINDOW_SIZE:
+                    self._ax.set_xlim(left=all_t[-_WINDOW_SIZE], right=all_t[-1])
+            else:
+                self._ax.set_xlim(left=max(0, total_pts - _WINDOW_SIZE), right=total_pts - 0.5)
+
+        self._ax.set_ylabel("浓度 / Concentration (%)")
+        self._ax.grid(True, alpha=0.3)
+        has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
+        if has_artists and (selected_gas != "all" or len(self._gas_names) <= 5):
+            self._ax.legend(loc="upper right", fontsize=8)
+        self._canvas.draw_idle()
+
+    def _plot_group_data(self, group_data: dict, selected_gas: str, glabel: str) -> tuple[bool, int]:
+        """Plot data for a single group. Returns (is_datetime, total_pts)."""
         is_datetime = False
         for _, (_, times) in group_data.items():
             if len(times) > 0:
@@ -237,8 +306,6 @@ class ConcentrationTab(QWidget):
                 break
         total_pts = sum(len(v) for v, _ in group_data.values())
         self._pt_label.setText(f"数据点 / Points: {total_pts}")
-
-        glabel = self._group_combo.currentData() or ""
 
         if selected_gas == "all":
             for i, name in enumerate(self._gas_names):
@@ -254,36 +321,12 @@ class ConcentrationTab(QWidget):
             if selected_gas in group_data:
                 vals, times = group_data[selected_gas]
                 if len(vals) > 0:
-                    color = _COLORS[self._gas_names.index(selected_gas) % len(_COLORS)
-                                    ] if selected_gas in self._gas_names else _COLORS[0]
+                    idx = self._gas_names.index(selected_gas) if selected_gas in self._gas_names else 0
+                    color = _COLORS[idx % len(_COLORS)]
                     self._ax.plot(times, vals, color=color, linewidth=1.2,
                                   label=selected_gas, marker=".", markersize=2)
             self._ax.set_title(f"浓度变化 [{glabel}] / {selected_gas}")
-
-        if is_datetime:
-            self._ax.set_xlabel("系统时间 / System Time")
-            self._ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-            self._fig.autofmt_xdate(rotation=30)
-        else:
-            self._ax.set_xlabel("帧序号 / Frame Index")
-
-        if total_pts > _WINDOW_SIZE:
-            if is_datetime:
-                all_t = []
-                for _, (_, times) in group_data.items():
-                    all_t.extend(times)
-                all_t.sort()
-                if len(all_t) >= _WINDOW_SIZE:
-                    self._ax.set_xlim(left=all_t[-_WINDOW_SIZE], right=all_t[-1])
-            else:
-                self._ax.set_xlim(left=max(0, total_pts - _WINDOW_SIZE), right=total_pts - 0.5)
-
-        self._ax.set_ylabel("浓度 / Concentration (%)")
-        self._ax.grid(True, alpha=0.3)
-        has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
-        if has_artists and (selected_gas != "all" or len(self._gas_names) <= 5):
-            self._ax.legend(loc="upper right", fontsize=8)
-        self._canvas.draw_idle()
+        return is_datetime, total_pts
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
