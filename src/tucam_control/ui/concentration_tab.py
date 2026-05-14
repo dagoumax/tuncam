@@ -43,6 +43,7 @@ class ConcentrationTab(QWidget):
         self._batch_idx: int = 0
         self._mode: str = "time"
         self._dirty: bool = False
+        self._new_data: bool = False
         self._last_export_dir: str = ""
         self._setup_ui()
 
@@ -158,6 +159,7 @@ class ConcentrationTab(QWidget):
         self.set_group_labels(group_labels)
         self.set_gas_names([r.name for r in all_group_results[0]])
 
+        self._new_data = True
         if all_group_results:
             self._update_table(all_group_results[0])
         self._redraw()
@@ -271,22 +273,22 @@ class ConcentrationTab(QWidget):
         else:
             self._ax.set_xlabel("帧序号 / Frame Index")
 
-        if total_pts > WINDOW_SIZE:
-            if is_datetime:
-                all_t = []
-                if not is_all_groups:
-                    for _, (_, times) in group_data.items():
-                        all_t.extend(times)
-                else:
+        if self._new_data:
+            self._new_data = False
+            if total_pts > WINDOW_SIZE:
+                if is_datetime:
+                    all_t = []
                     for lbl in self._group_labels:
-                        if lbl in self._history and selected_gas in self._history[lbl]:
-                            _, times = self._history[lbl][selected_gas]
+                        gdata = self._history.get(lbl, {})
+                        for _, (_, times) in gdata.items():
                             all_t.extend(times)
-                all_t.sort()
-                if len(all_t) >= WINDOW_SIZE:
-                    self._ax.set_xlim(left=all_t[-WINDOW_SIZE], right=all_t[-1])
+                    if all_t:
+                        all_t.sort()
+                        self._ax.set_xlim(left=all_t[-WINDOW_SIZE], right=all_t[-1])
+                else:
+                    self._ax.set_xlim(left=max(0, total_pts - WINDOW_SIZE), right=total_pts - 0.5)
             else:
-                self._ax.set_xlim(left=max(0, total_pts - WINDOW_SIZE), right=total_pts - 0.5)
+                self._ax.autoscale()
 
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
