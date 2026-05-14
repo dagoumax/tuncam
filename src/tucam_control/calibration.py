@@ -51,3 +51,21 @@ def apply_calibration(pixels: np.ndarray, coeffs: np.ndarray | None) -> np.ndarr
     if coeffs is None or len(coeffs) == 0:
         return pixels.astype(np.float64)
     return np.polyval(coeffs, pixels.astype(np.float64))
+
+
+def pixel_from_raman(raman_shift: float, coeffs: np.ndarray) -> int:
+    """Given a Raman shift (cm⁻¹), find the nearest pixel column using calibration."""
+    if coeffs is None or len(coeffs) == 0:
+        return int(raman_shift)
+    # Solve polynomial: coeffs[0]*p^n + ... + coeffs[-1] = raman_shift
+    # Build polynomial with RHS subtracted
+    p = np.polynomial.Polynomial(coeffs[::-1] - np.array([raman_shift]))
+    roots = p.roots()
+    real_roots = np.real(roots[np.isreal(roots)])
+    positive_roots = real_roots[real_roots >= 0]
+    if len(positive_roots) > 0:
+        return int(round(positive_roots[0]))
+    # Fallback: brute-force search
+    candidates = np.arange(0, 4096)
+    vals = np.polyval(coeffs, candidates.astype(np.float64))
+    return int(candidates[np.argmin(np.abs(vals - raman_shift))])

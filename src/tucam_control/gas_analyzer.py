@@ -15,9 +15,10 @@ class GasConfig:
     """Configuration for a single gas species."""
 
     name: str
-    position: int       # expected peak column index
-    window: int = 15    # search window (± columns)
-    coefficient: float = 1.0  # calibration coefficient
+    position: int               # expected peak column index
+    window: int = 15            # search window (± columns)
+    coefficient: float = 1.0    # calibration coefficient
+    raman_shift: float = 0.0    # reference Raman shift (cm⁻¹), 0 = unknown
 
 
 def _local_baseline(spectrum: np.ndarray, center: int, window: int) -> float:
@@ -189,7 +190,7 @@ class GasAnalyzer:
     def default_gases() -> list[GasConfig]:
         """Return the default gas configuration for Dhyana-95-V2."""
         return [
-            GasConfig("O2", 584, 15, 1.0),
-            GasConfig("N2", 1024, 15, 1.0),
-            GasConfig("CO2", 488, 15, 1.0),
+            GasConfig("O2", 572, 15, 1.0, raman_shift=1558),
+            GasConfig("N2", 1015, 15, 1.0, raman_shift=2333),
+            GasConfig("CO2", 488, 15, 1.0, raman_shift=0),
         ]

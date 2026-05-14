@@ -9,7 +9,7 @@ import numpy as np
 from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -43,6 +43,8 @@ _COLORS = [
 
 class DataTab(QWidget):
     """Third tab: line plot of processed row-group spectra with cursor readout."""
+
+    calibration_changed = Signal(object)  # emits np.ndarray | None
 
     def __init__(self) -> None:
         super().__init__()
@@ -145,6 +147,7 @@ class DataTab(QWidget):
         dlg = CalibrationDialog(self._data, self._row_labels, self._calib_coeffs, self)
         if dlg.exec():
             self._calib_coeffs = dlg.result_coeffs
+            self.calibration_changed.emit(self._calib_coeffs)
             self._redraw()
 
     def _x_axis_values(self, n_cols: int) -> np.ndarray:

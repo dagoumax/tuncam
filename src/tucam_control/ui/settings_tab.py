@@ -128,8 +128,8 @@ class SettingsTab(QWidget):
         gas_layout = QVBoxLayout(gas_gb)
 
         self._gas_table = QTableWidget()
-        self._gas_table.setColumnCount(4)
-        self._gas_table.setHorizontalHeaderLabels(["名称 / Name", "位置 / Pos", "窗口 / Window", "系数 / Coeff"])
+        self._gas_table.setColumnCount(5)
+        self._gas_table.setHorizontalHeaderLabels(["名称 / Name", "位置 / Pos", "窗口 / Win", "系数 / Coeff", "拉曼位移 / Shift"])
         self._gas_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._gas_table.setMinimumHeight(120)
         gas_layout.addWidget(self._gas_table)
@@ -169,31 +169,35 @@ class SettingsTab(QWidget):
     def _init_gas_table(self) -> None:
         configs = GasAnalyzer.default_gases()
         for cfg in configs:
-            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient)
+            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient, cfg.raman_shift)
 
-    def _add_gas_row(self, name: str = "", pos: int = 0, window: int = 15, coeff: float = 1.0) -> None:
+    def _add_gas_row(self, name: str = "", pos: int = 0, window: int = 15,
+                     coeff: float = 1.0, shift: float = 0.0) -> None:
         row = self._gas_table.rowCount()
         self._gas_table.insertRow(row)
         self._gas_table.setItem(row, 0, QTableWidgetItem(name))
         self._gas_table.setItem(row, 1, QTableWidgetItem(str(pos)))
         self._gas_table.setItem(row, 2, QTableWidgetItem(str(window)))
         self._gas_table.setItem(row, 3, QTableWidgetItem(str(coeff)))
+        self._gas_table.setItem(row, 4, QTableWidgetItem(str(shift) if shift else ""))
 
     def _get_gas_configs(self) -> list[GasConfig]:
         configs = []
         for row in range(self._gas_table.rowCount()):
             items = [
                 (self._gas_table.item(row, c).text().strip() if self._gas_table.item(row, c) else "")
-                for c in range(4)
+                for c in range(5)
             ]
             if not items[0]:
                 continue
             try:
+                shift_text = items[4].strip()
                 configs.append(GasConfig(
                     name=items[0],
                     position=int(items[1]),
                     window=int(items[2]),
                     coefficient=float(items[3]),
+                    raman_shift=float(shift_text) if shift_text else 0.0,
                 ))
             except (ValueError, IndexError):
                 continue
@@ -202,10 +206,10 @@ class SettingsTab(QWidget):
     def update_gas_table(self, configs: list[GasConfig]) -> None:
         self._gas_table.setRowCount(0)
         for cfg in configs:
-            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient)
+            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient, cfg.raman_shift)
 
     def _on_add_gas(self) -> None:
-        self._add_gas_row("New", 0, 15, 1.0)
+        self._add_gas_row("New", 0, 15, 1.0, 0.0)
 
     def _on_del_gas(self) -> None:
         row = self._gas_table.currentRow()

@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
 
         self._tabs.addTab(self._acq_tab, "采集 / Acquisition")
         self._tabs.addTab(self._settings_tab, "设置 / Settings")
-        self._tabs.addTab(self._data_tab, "图谱 / Spectrum")
+        self._tabs.addTab(self._data_tab, "拉曼光谱 / Raman")
         self._tabs.addTab(self._conc_tab, "浓度 / Concentration")
 
         self._status_bar = QStatusBar()
@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self._settings_tab.settings_changed.connect(self._on_settings_changed)
 
         self._acq_tab.frame_ready.connect(self._on_frame_ready)
+        self._data_tab.calibration_changed.connect(self._on_calibration_changed)
 
     # ------------------------------------------------------------------
     # Camera management
@@ -481,6 +482,18 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, arr: np.ndarray) -> None:
         self._process_and_display(arr)
+
+    @Slot(object)
+    def _on_calibration_changed(self, coeffs: np.ndarray | None) -> None:
+        """When calibration changes, update gas pixel positions from Raman shifts."""
+        if coeffs is None:
+            return
+        from ..calibration import pixel_from_raman
+        for cfg in self._analyzer.gases:
+            if cfg.raman_shift > 0:
+                cfg.position = pixel_from_raman(cfg.raman_shift, coeffs)
+        self._settings_tab.update_gas_table(self._analyzer.gases)
+        self._reprocess_cached()
 
     def _process_and_display(self, arr: np.ndarray) -> None:
         try:
