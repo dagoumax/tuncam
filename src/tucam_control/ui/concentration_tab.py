@@ -9,7 +9,7 @@ from collections import defaultdict
 import matplotlib
 import matplotlib.font_manager as fm
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -52,6 +52,8 @@ class ConcentrationTab(QWidget):
         self._history: dict[str, tuple[list[float], list[float]]] = defaultdict(
             lambda: ([], [])
         )
+        self._batch_idx: int = 0
+        self._mode: str = "time"    # "time" or "index"
         self._start_time: float = time.time()
         self._setup_ui()
 
@@ -104,6 +106,11 @@ class ConcentrationTab(QWidget):
         self._ax = self._fig.add_subplot(111)
         self._canvas = FigureCanvasQTAgg(self._fig)
         right.addWidget(self._canvas, 1)
+
+        self._toolbar = NavigationToolbar2QT(self._canvas, self)
+        self._toolbar.setMaximumHeight(30)
+        right.addWidget(self._toolbar)
+
         layout.addLayout(right, 2)
 
     # ------------------------------------------------------------------
@@ -119,13 +126,18 @@ class ConcentrationTab(QWidget):
             self._gas_combo.addItem(name, name)
         self._gas_combo.blockSignals(False)
 
-    def add_data_point(self, gas_results: list) -> None:
+    def add_data_point(self, gas_results: list, mode: str = "time") -> None:
         """
         Add a new measurement point.
 
-        *gas_results*: list of ``GasResult`` objects from ``GasAnalyzer.analyze()``.
+        *mode*: ``"time"`` = elapsed seconds (camera), ``"index"`` = frame number (batch).
         """
-        t = time.time() - self._start_time
+        self._mode = mode
+        if mode == "index":
+            t = float(self._batch_idx)
+            self._batch_idx += 1
+        else:
+            t = time.time() - self._start_time
         for r in gas_results:
             vals, times = self._history[r.name]
             vals.append(r.concentration * 100)
@@ -136,6 +148,7 @@ class ConcentrationTab(QWidget):
 
     def clear_history(self) -> None:
         self._history.clear()
+        self._batch_idx = 0
         self._start_time = time.time()
         self._table.setRowCount(0)
         self._total_label.setText("浓度总和 / Total: --")
@@ -182,7 +195,8 @@ class ConcentrationTab(QWidget):
         total_pts = sum(len(v) for v, _ in self._history.values())
         self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
-        self._ax.set_xlabel("时间 / Time (s)")
+        xlabel = "帧序号 / Frame Index" if self._mode == "index" else "时间 / Time (s)"
+        self._ax.set_xlabel(xlabel)
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
         if selected != "all" or len(self._gas_names) <= 5:

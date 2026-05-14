@@ -7,7 +7,7 @@ import matplotlib
 import matplotlib.font_manager as fm
 import numpy as np
 from matplotlib.backend_bases import MouseButton
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -91,6 +91,10 @@ class DataTab(QWidget):
         self._canvas = FigureCanvasQTAgg(self._fig)
         self._canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         layout.addWidget(self._canvas, 1)
+
+        self._toolbar = NavigationToolbar2QT(self._canvas, self)
+        self._toolbar.setMaximumHeight(30)
+        layout.addWidget(self._toolbar)
 
         self._canvas.mpl_connect("button_press_event", self._on_click)
         self._canvas.mpl_connect("key_press_event", self._on_key)

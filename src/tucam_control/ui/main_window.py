@@ -65,6 +65,12 @@ class MainWindow(QMainWindow):
         self._capture_timer.setInterval(50)
         self._capture_timer.timeout.connect(self._on_capture_poll)
 
+        self._batch_images: list[tuple[str, np.ndarray]] = []
+        self._batch_idx: int = 0
+        self._batch_timer = QTimer(self)
+        self._batch_timer.setInterval(200)
+        self._batch_timer.timeout.connect(self._on_batch_tick)
+
         self._try_connect()
 
     # ------------------------------------------------------------------
@@ -96,6 +102,8 @@ class MainWindow(QMainWindow):
         self._acq_tab.save_requested.connect(self._on_save)
         self._acq_tab.connect_requested.connect(self._on_reconnect)
         self._acq_tab.load_tif_requested.connect(self._on_load_tif)
+        self._acq_tab.batch_load_requested.connect(self._on_batch_load)
+        self._acq_tab.batch_stop_requested.connect(self._on_batch_stop)
 
         self._settings_tab.settings_changed.connect(self._on_settings_changed)
 
@@ -204,6 +212,63 @@ class MainWindow(QMainWindow):
                 "载入失败 / Load Failed",
                 f"无法读取文件：\n{path}\n\n{exc}",
             )
+
+    # ------------------------------------------------------------------
+    # Batch TIF testing
+    # ------------------------------------------------------------------
+
+    @Slot(str)
+    def _on_batch_load(self, folder: str) -> None:
+        import glob
+        folder_path = Path(folder)
+        tif_files = sorted(
+            glob.glob(str(folder_path / "*.tif"))
+            + glob.glob(str(folder_path / "*.tiff"))
+        )
+        if not tif_files:
+            QMessageBox.warning(
+                self,
+                "无 TIF 文件 / No TIF Files",
+                f"文件夹内未找到 .tif 文件：\n{folder}",
+            )
+            return
+
+        self._batch_images.clear()
+        for f in tif_files:
+            try:
+                img = Image.open(f)
+                arr = np.array(img, dtype=np.uint16)
+                if arr.ndim == 2:
+                    self._batch_images.append((f, arr))
+            except Exception as exc:
+                self.status_changed.emit(f"跳过 {Path(f).name}: {exc}")
+
+        if not self._batch_images:
+            QMessageBox.warning(self, "加载失败", "没有成功加载任何图像。")
+            return
+
+        self._batch_idx = 0
+        self._conc_tab.clear_history()
+        self._conc_tab._mode = "index"
+        self._acq_tab.set_batch_state(True)
+        self._batch_timer.start()
+        self.status_changed.emit(f"批量测试: {len(self._batch_images)} 张图像")
+
+    @Slot()
+    def _on_batch_tick(self) -> None:
+        if self._batch_idx >= len(self._batch_images):
+            self._on_batch_stop()
+            return
+        path, arr = self._batch_images[self._batch_idx]
+        self._batch_idx += 1
+        self._acq_tab.display_frame(arr)
+        self.status_changed.emit(f"Batch [{self._batch_idx}/{len(self._batch_images)}] {Path(path).name}")
+
+    @Slot()
+    def _on_batch_stop(self) -> None:
+        self._batch_timer.stop()
+        self._acq_tab.set_batch_state(False)
+        self.status_changed.emit(f"批量测试结束 / Batch finished ({len(self._batch_images)} images)")
 
     # ------------------------------------------------------------------
     # Acquisition callbacks
@@ -433,7 +498,8 @@ class MainWindow(QMainWindow):
             self._conc_tab.set_gas_names(gas_names)
             if result.shape[0] > 0:
                 g_results = self._analyzer.analyze(result[0])
-                self._conc_tab.add_data_point(g_results)
+                mode = "index" if self._batch_timer.isActive() else "time"
+                self._conc_tab.add_data_point(g_results, mode=mode)
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -459,7 +525,8 @@ class MainWindow(QMainWindow):
             self._conc_tab.set_gas_names(gas_names)
             if result.shape[0] > 0:
                 g_results = self._analyzer.analyze(result[0])
-                self._conc_tab.add_data_point(g_results)
+                mode = "index" if self._batch_timer.isActive() else "time"
+                self._conc_tab.add_data_point(g_results, mode=mode)
 
     # ------------------------------------------------------------------
     # Close
@@ -468,6 +535,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self._refresh_timer.stop()
         self._capture_timer.stop()
+        self._batch_timer.stop()
         try:
             self._camera.uninitialize()
         except Exception:

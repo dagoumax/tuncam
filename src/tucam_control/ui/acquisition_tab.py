@@ -169,6 +169,9 @@ class AcquisitionTab(QWidget):
     save_requested = Signal()
     connect_requested = Signal()
     load_tif_requested = Signal(str)
+    batch_load_requested = Signal(str)
+    batch_start_requested = Signal()
+    batch_stop_requested = Signal()
     frame_ready = Signal(object)
 
     def __init__(self) -> None:
@@ -192,6 +195,9 @@ class AcquisitionTab(QWidget):
         self._btn_save = QPushButton("保存图片\nSave Image")
         self._btn_connect = QPushButton("重新连接\nReconnect")
         self._btn_load = QPushButton("载入TIF\nLoad TIF")
+        self._btn_batch = QPushButton("批量测试\nBatch Test")
+        self._btn_batch_stop = QPushButton("停止批量\nStop Batch")
+        self._btn_batch_stop.setEnabled(False)
 
         self._btn_single.clicked.connect(self.start_single)
         self._btn_cont.clicked.connect(self.start_continuous)
@@ -199,9 +205,12 @@ class AcquisitionTab(QWidget):
         self._btn_save.clicked.connect(self.save_requested)
         self._btn_connect.clicked.connect(self.connect_requested)
         self._btn_load.clicked.connect(self._on_load_tif)
+        self._btn_batch.clicked.connect(self._on_batch_load)
+        self._btn_batch_stop.clicked.connect(self.batch_stop_requested)
 
         for btn in (self._btn_single, self._btn_cont, self._btn_stop,
-                     self._btn_save, self._btn_connect, self._btn_load):
+                     self._btn_save, self._btn_connect, self._btn_load,
+                     self._btn_batch, self._btn_batch_stop):
             btn.setMinimumHeight(48)
 
         btn_row.addWidget(self._btn_single)
@@ -210,6 +219,8 @@ class AcquisitionTab(QWidget):
         btn_row.addWidget(self._btn_save)
         btn_row.addWidget(self._btn_connect)
         btn_row.addWidget(self._btn_load)
+        btn_row.addWidget(self._btn_batch)
+        btn_row.addWidget(self._btn_batch_stop)
 
         left.addWidget(self._img_label, 1)
         left.addWidget(self._cursor_info)
@@ -241,6 +252,15 @@ class AcquisitionTab(QWidget):
         self._btn_single.setEnabled(not active)
         self._btn_cont.setEnabled(not active)
         self._btn_stop.setEnabled(active)
+        self._btn_batch.setEnabled(not active)
+        self._btn_batch_stop.setEnabled(active)
+
+    def set_batch_state(self, active: bool) -> None:
+        self._btn_single.setEnabled(not active)
+        self._btn_cont.setEnabled(not active)
+        self._btn_stop.setEnabled(False)
+        self._btn_batch.setEnabled(not active)
+        self._btn_batch_stop.setEnabled(active)
 
     def show_device_info(self, info: CameraInfo) -> None:
         lines = [
@@ -291,3 +311,13 @@ class AcquisitionTab(QWidget):
         )
         for path in paths:
             self.load_tif_requested.emit(path)
+
+    @Slot()
+    def _on_batch_load(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择含 TIF 的文件夹 / Select TIF Folder",
+            "",
+        )
+        if folder:
+            self.batch_load_requested.emit(folder)
