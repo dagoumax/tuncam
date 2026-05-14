@@ -55,6 +55,7 @@ class ConcentrationTab(QWidget):
         self._batch_idx: int = 0
         self._mode: str = "time"    # "time" or "index"
         self._start_time: float = time.time()
+        self._dirty: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -172,8 +173,10 @@ class ConcentrationTab(QWidget):
         self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
 
     def _redraw(self) -> None:
+        self._dirty = True
         if not self.isVisible():
             return
+        self._dirty = False
         self._ax.clear()
 
         selected = self._gas_combo.currentData()
@@ -205,6 +208,11 @@ class ConcentrationTab(QWidget):
         if has_artists and (selected != "all" or len(self._gas_names) <= 5):
             self._ax.legend(loc="upper right", fontsize=8)
         self._canvas.draw_idle()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._dirty:
+            self._redraw()
 
     def _on_clear(self) -> None:
         self.clear_history()

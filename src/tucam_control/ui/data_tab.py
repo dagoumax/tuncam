@@ -50,6 +50,7 @@ class DataTab(QWidget):
         self._cursor_group: int = 0
         self._cursor_line = None
         self._cursor_annot = None
+        self._dirty: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -188,9 +189,16 @@ class DataTab(QWidget):
         self._cursor_on = False
         self._redraw()
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._dirty:
+            self._redraw()
+
     def _redraw(self) -> None:
+        self._dirty = True
         if not self.isVisible():
             return
+        self._dirty = False
         self._ax.clear()
 
         if self._data is None:
