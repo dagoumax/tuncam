@@ -230,7 +230,7 @@ class ConcentrationTab(QWidget):
                         continue
                     if not is_datetime and len(times) > 0:
                         is_datetime = isinstance(times[0], datetime)
-                    color = COLORS[color_idx % len(_COLORS)]
+                    color = COLORS[color_idx % len(COLORS)]
                     color_idx += 1
                     line_label = f"{lbl} {name}"
                     self._ax.plot(times, vals, color=color, linewidth=0.8,
@@ -261,7 +261,7 @@ class ConcentrationTab(QWidget):
                     continue
                 if not is_datetime and len(times) > 0:
                     is_datetime = isinstance(times[0], datetime)
-                color = COLORS[i % len(_COLORS)]
+                color = COLORS[i % len(COLORS)]
                 self._ax.plot(times, vals, color=color, linewidth=1.0,
                               label=lbl, marker=".", markersize=2)
                 total_pts += len(vals)
@@ -322,7 +322,7 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[name]
                 if len(vals) == 0:
                     continue
-                self._ax.plot(times, vals, color=COLORS[i % len(_COLORS)],
+                self._ax.plot(times, vals, color=COLORS[i % len(COLORS)],
                               linewidth=1.0, label=name, marker=".", markersize=2)
             self._ax.set_title(f"浓度变化 [{glabel}] / All Gases")
         else:
@@ -330,7 +330,7 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[selected_gas]
                 if len(vals) > 0:
                     idx = self._gas_names.index(selected_gas) if selected_gas in self._gas_names else 0
-                    color = COLORS[idx % len(_COLORS)]
+                    color = COLORS[idx % len(COLORS)]
                     self._ax.plot(times, vals, color=color, linewidth=1.2,
                                   label=selected_gas, marker=".", markersize=2)
             self._ax.set_title(f"浓度变化 [{glabel}] / {selected_gas}")

@@ -287,7 +287,7 @@ class DataTab(QWidget):
             ys = [self._data[i, x] for i in range(self._data.shape[0])]
             self._ax.axvline(x=x_val, color="red", linewidth=0.8, alpha=0.6)
             for i, y in enumerate(ys):
-                color = COLORS[i % len(_COLORS)]
+                color = COLORS[i % len(COLORS)]
                 self._ax.axhline(y=y, color=color, linewidth=0.5, alpha=0.3, linestyle="--")
             text_lines = [f"{x_str}:"]
             for i, y in enumerate(ys):
@@ -324,7 +324,7 @@ class DataTab(QWidget):
         n_groups = self._data.shape[0]
         for i in range(n_groups):
             label = self._row_labels[i] if i < len(self._row_labels) else f"组 {i + 1}"
-            color = COLORS[i % len(_COLORS)]
+            color = COLORS[i % len(COLORS)]
             spectrum = self._data[i]
             x = self._x_axis_values(len(spectrum))
             self._ax.plot(x, spectrum, color=color, linewidth=0.8, label=f"{label}")
