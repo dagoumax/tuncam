@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import csv
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 import matplotlib
+import matplotlib.dates as mdates
 import matplotlib.font_manager as fm
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -14,9 +17,11 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -42,6 +47,8 @@ _COLORS = [
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ]
 
+_WINDOW_SIZE = 100
+
 
 class ConcentrationTab(QWidget):
     """Fourth tab: current concentrations table + trend chart."""
@@ -49,13 +56,14 @@ class ConcentrationTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._gas_names: list[str] = []
-        self._history: dict[str, tuple[list[float], list[float]]] = defaultdict(
+        self._history: dict[str, tuple[list[float], list[object]]] = defaultdict(
             lambda: ([], [])
         )
         self._batch_idx: int = 0
-        self._mode: str = "time"    # "time" or "index"
+        self._mode: str = "time"
         self._start_time: float = time.time()
         self._dirty: bool = False
+        self._last_export_dir: str = ""
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -88,9 +96,12 @@ class ConcentrationTab(QWidget):
         ctrl_layout.addLayout(ctrl_row)
 
         btn_row = QHBoxLayout()
-        self._btn_clear = QPushButton("清除历史 / Clear History")
+        self._btn_clear = QPushButton("清除历史 / Clear")
         self._btn_clear.clicked.connect(self._on_clear)
+        self._btn_export = QPushButton("导出 CSV / Export")
+        self._btn_export.clicked.connect(self._on_export)
         btn_row.addWidget(self._btn_clear)
+        btn_row.addWidget(self._btn_export)
         ctrl_layout.addLayout(btn_row)
 
         self._pt_label = QLabel("数据点 / Points: 0")
@@ -128,17 +139,12 @@ class ConcentrationTab(QWidget):
         self._gas_combo.blockSignals(False)
 
     def add_data_point(self, gas_results: list, mode: str = "time") -> None:
-        """
-        Add a new measurement point.
-
-        *mode*: ``"time"`` = elapsed seconds (camera), ``"index"`` = frame number (batch).
-        """
         self._mode = mode
         if mode == "index":
             t = float(self._batch_idx)
             self._batch_idx += 1
         else:
-            t = time.time() - self._start_time
+            t = datetime.now()
         for r in gas_results:
             vals, times = self._history[r.name]
             vals.append(r.concentration * 100)
@@ -180,6 +186,7 @@ class ConcentrationTab(QWidget):
         self._ax.clear()
 
         selected = self._gas_combo.currentData()
+        is_time_mode = self._mode == "time"
 
         if selected == "all":
             for i, name in enumerate(self._gas_names):
@@ -200,8 +207,26 @@ class ConcentrationTab(QWidget):
         total_pts = sum(len(v) for v, _ in self._history.values())
         self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
-        xlabel = "帧序号 / Frame Index" if self._mode == "index" else "时间 / Time (s)"
-        self._ax.set_xlabel(xlabel)
+        if is_time_mode:
+            self._ax.set_xlabel("系统时间 / System Time")
+            self._ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            self._fig.autofmt_xdate(rotation=30)
+        else:
+            self._ax.set_xlabel("帧序号 / Frame Index")
+
+        if total_pts > _WINDOW_SIZE:
+            if is_time_mode:
+                all_times = []
+                for _, times in self._history.values():
+                    all_times.extend(times)
+                all_times.sort()
+                if len(all_times) >= _WINDOW_SIZE:
+                    left_bound = all_times[-_WINDOW_SIZE]
+                    right_bound = all_times[-1]
+                    self._ax.set_xlim(left=left_bound, right=right_bound)
+            else:
+                self._ax.set_xlim(left=max(0, total_pts - _WINDOW_SIZE), right=total_pts - 0.5)
+
         self._ax.set_ylabel("浓度 / Concentration (%)")
         self._ax.grid(True, alpha=0.3)
         has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
@@ -216,3 +241,50 @@ class ConcentrationTab(QWidget):
 
     def _on_clear(self) -> None:
         self.clear_history()
+
+    def _on_export(self) -> None:
+        total_pts = sum(len(v) for v, _ in self._history.values())
+        if not self._gas_names or total_pts == 0:
+            QMessageBox.information(self, "导出 / Export", "没有数据可导出。")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出浓度数据 / Export Concentration Data",
+            self._last_export_dir or "concentration.csv",
+            "CSV (*.csv)",
+        )
+        if not path:
+            return
+        self._last_export_dir = path
+
+        try:
+            is_time_mode = self._mode == "time"
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                header = ["时间 / Time" if is_time_mode else "帧序号 / Index"]
+                header += self._gas_names
+                writer.writerow(header)
+
+                max_len = max((len(vals) for vals, _ in self._history.values()), default=0)
+                for i in range(max_len):
+                    row = []
+                    # Grab time from the first gas that has this index
+                    t_val = ""
+                    for name in self._gas_names:
+                        vals, times = self._history[name]
+                        if i < len(times):
+                            if is_time_mode:
+                                t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                            else:
+                                t_val = str(int(times[i]))
+                            break
+                    row.append(t_val)
+                    for name in self._gas_names:
+                        vals, _ = self._history[name]
+                        row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
+                    writer.writerow(row)
+
+            QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
