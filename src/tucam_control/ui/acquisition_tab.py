@@ -74,6 +74,8 @@ class ImageLabel(QLabel):
             return 0, 0
         pw = pixmap.width()
         ph = pixmap.height()
+        if pw <= 0 or ph <= 0:
+            return 0, 0
         lw = self.width()
         lh = self.height()
         ox = (lw - pw) // 2
@@ -109,30 +111,36 @@ class ImageLabel(QLabel):
         super().paintEvent(event)
         if not self._cursor_enabled or self._raw_array is None:
             return
-        wx, wy = self._image_to_widget(self._cursor_image_x, self._cursor_image_y)
-        painter = QPainter(self)
-        pen = QPen(QColor(255, 0, 0), 1)
-        painter.setPen(pen)
-        painter.drawLine(wx - 8, wy, wx + 8, wy)
-        painter.drawLine(wx, wy - 8, wx, wy + 8)
-        painter.fillRect(wx + 10, wy + 4, 220, 20, QColor(0, 0, 0, 180))
-        painter.setPen(QColor(0, 255, 0))
-        painter.setFont(QFont("Consolas", 9))
-        painter.drawText(wx + 14, wy + 18, self._get_value_str())
-        painter.end()
+        try:
+            wx, wy = self._image_to_widget(self._cursor_image_x, self._cursor_image_y)
+            painter = QPainter(self)
+            pen = QPen(QColor(255, 0, 0), 1)
+            painter.setPen(pen)
+            painter.drawLine(wx - 8, wy, wx + 8, wy)
+            painter.drawLine(wx, wy - 8, wx, wy + 8)
+            painter.fillRect(wx + 10, wy + 4, 220, 20, QColor(0, 0, 0, 180))
+            painter.setPen(QColor(0, 255, 0))
+            painter.setFont(QFont("Consolas", 9))
+            painter.drawText(wx + 14, wy + 18, self._get_value_str())
+            painter.end()
+        except Exception:
+            pass
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.RightButton:
-            self._cursor_enabled = False
-            self.update()
-            return
-        if event.button() == Qt.MouseButton.LeftButton and self._raw_array is not None:
-            ix, iy = self._widget_to_image(int(event.position().x()), int(event.position().y()))
-            self._cursor_image_x = ix
-            self._cursor_image_y = iy
-            self._cursor_enabled = True
-            self.setFocus()
-            self.update()
+        try:
+            if event.button() == Qt.MouseButton.RightButton:
+                self._cursor_enabled = False
+                self.update()
+                return
+            if event.button() == Qt.MouseButton.LeftButton and self._raw_array is not None:
+                ix, iy = self._widget_to_image(int(event.position().x()), int(event.position().y()))
+                self._cursor_image_x = ix
+                self._cursor_image_y = iy
+                self._cursor_enabled = True
+                self.setFocus()
+                self.update()
+        except Exception:
+            pass
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not self._cursor_enabled or self._raw_array is None:

@@ -148,26 +148,29 @@ class DataTab(QWidget):
         self._redraw()
 
     def _on_click(self, event) -> None:
-        if event.inaxes != self._ax or self._data is None:
-            return
-        # Don't place cursor when zoom/pan is active
-        if self._toolbar.mode != "":
-            return
-        # Must have cursor mode enabled
-        if not self._cursor_toggle_cb.isChecked():
-            return
-        if event.button == MouseButton.RIGHT:
-            self._cursor_on = False
-            self._cursor_label.setText("光标: 已关闭 / Cursor off")
-            self._redraw()
-            return
-        if event.button == MouseButton.LEFT:
-            n_data = self._data.shape[1]
-            px = pixel_from_raman(float(event.xdata), self._calib_coeffs)
-            self._cursor_idx = max(0, min(int(round(px)), n_data - 1))
-            self._cursor_on = True
-            self._canvas.setFocus()
-            self._redraw()
+        try:
+            if event.inaxes != self._ax or self._data is None:
+                return
+            if self._toolbar.mode != "":
+                return
+            if not self._cursor_toggle_cb.isChecked():
+                return
+            if event.button == MouseButton.RIGHT:
+                self._cursor_on = False
+                self._cursor_label.setText("光标: 已关闭 / Cursor off")
+                self._redraw()
+                return
+            if event.button == MouseButton.LEFT:
+                if event.xdata is None:
+                    return
+                n_data = self._data.shape[1]
+                px = pixel_from_raman(float(event.xdata), self._calib_coeffs)
+                self._cursor_idx = max(0, min(int(round(px)), n_data - 1))
+                self._cursor_on = True
+                self._canvas.setFocus()
+                self._redraw()
+        except Exception:
+            pass
 
     def _on_key(self, event) -> None:
         if not self._cursor_on or self._data is None:
