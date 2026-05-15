@@ -48,9 +48,8 @@ class ConcentrationTab(QWidget):
 
         from PySide6.QtCore import QTimer
         self._redraw_timer = QTimer(self)
-        self._redraw_timer.setSingleShot(True)
-        self._redraw_timer.setInterval(300)
-        self._redraw_timer.timeout.connect(self._do_redraw)
+        self._redraw_timer.setInterval(500)
+        self._redraw_timer.timeout.connect(self._tick_redraw)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -211,12 +210,19 @@ class ConcentrationTab(QWidget):
         self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
 
     def _redraw(self) -> None:
-        """Request a redraw (debounced — batches rapid calls)."""
+        """Request a redraw (periodic — starts timer if not running)."""
         self._dirty = True
-        self._redraw_timer.start()
+        if not self._redraw_timer.isActive():
+            self._redraw_timer.start()
+
+    def _tick_redraw(self) -> None:
+        """Periodic tick: redraw if dirty, stop timer if not."""
+        if self._dirty:
+            self._do_redraw()
+        else:
+            self._redraw_timer.stop()
 
     def _do_redraw(self) -> None:
-        self._dirty = True
         if not self.isVisible():
             return
         self._dirty = False
