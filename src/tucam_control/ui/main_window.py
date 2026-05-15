@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
             info = self._camera.get_device_info()
             self._acq_tab.show_device_info(info)
             self._settings_tab.update_ranges(self._camera)
+            self._settings_tab.update_device_status(info)
             self.status_changed.emit(f"已连接 / Connected: {info.model}")
             self._was_connected = True
             self._disconnect_warned = False
@@ -148,6 +149,7 @@ class MainWindow(QMainWindow):
                 "请检查相机连接后点击「重新连接」。\n"
                 "也可以点击「载入TIF」使用测试图片。",
             )
+            self._settings_tab.update_device_status(None)
             self._was_connected = False
 
     def _apply_current_settings(self) -> None:
@@ -380,6 +382,7 @@ class MainWindow(QMainWindow):
         try:
             info = self._camera.get_device_info()
             self._acq_tab.update_telemetry(info)
+            self._settings_tab.update_device_status(info)
         except Exception:
             if self._was_connected and not self._disconnect_warned:
                 self._on_device_lost()
@@ -393,6 +396,7 @@ class MainWindow(QMainWindow):
         self._was_connected = False
         self._capture_timer.stop()
         self._acq_tab.set_capturing_state(False)
+        self._settings_tab.update_device_status(None)
         try:
             self._camera.stop_capture()
         except Exception:

@@ -56,6 +56,9 @@ def main() -> None:
     window = MainWindow()
     window.show()
 
+    # Ensure camera is released on any exit
+    app.aboutToQuit.connect(window.close)
+
     sys.exit(app.exec())
 
 

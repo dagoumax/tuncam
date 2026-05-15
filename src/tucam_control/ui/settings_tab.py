@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..camera import CameraController
+from ..camera import CameraController, CameraInfo
 from ..data_processor import DataProcessor
 from ..gas_analyzer import GasAnalyzer, GasConfig
 
@@ -146,6 +146,17 @@ class SettingsTab(QWidget):
 
         layout.addWidget(gas_gb)
 
+        # ---- Device status ----
+        status_gb = QGroupBox("设备状态 / Device Status")
+        status_layout = QFormLayout(status_gb)
+        self._status_connect = QLabel("--")
+        self._status_name = QLabel("--")
+        self._status_temp = QLabel("--")
+        status_layout.addRow("连接状态 / Connection:", self._status_connect)
+        status_layout.addRow("设备名称 / Device:", self._status_name)
+        status_layout.addRow("温度 / Temperature:", self._status_temp)
+        layout.addWidget(status_gb)
+
         # ---- Info labels ----
         info_gb = QGroupBox("参数范围 / Property Ranges")
         info_form = QFormLayout(info_gb)
@@ -217,6 +228,22 @@ class SettingsTab(QWidget):
             self._gas_table.removeRow(row)
         else:
             QMessageBox.information(self, "提示 / Info", "请先点击选中要删除的行。")
+
+    def update_device_status(self, info: CameraInfo | None) -> None:
+        if info is None:
+            self._status_connect.setText("未连接 / Disconnected")
+            self._status_connect.setStyleSheet("color: red;")
+            self._status_name.setText("--")
+            self._status_temp.setText("--")
+        else:
+            self._status_connect.setText("已连接 / Connected")
+            self._status_connect.setStyleSheet("color: green;")
+            self._status_name.setText(info.model or "--")
+            self._status_temp.setText(
+                f"FPGA {info.fpga_temperature:.1f} °C  |  "
+                f"PCB {info.pcba_temperature:.1f} °C  |  "
+                f"环境 {info.env_temperature:.1f} °C"
+            )
 
     def update_ranges(self, camera: CameraController) -> None:
         try:
