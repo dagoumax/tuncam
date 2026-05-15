@@ -69,6 +69,12 @@ class SettingsTab(QWidget):
         self._fan_combo.setCurrentIndex(0)
         cam_form.addRow("风扇档位 / Fan Gear:", self._fan_combo)
 
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("HDR (默认)", 0)
+        self._mode_combo.addItem("High Gain (高灵敏度)", 1)
+        self._mode_combo.addItem("Low Gain (高满阱)", 2)
+        cam_form.addRow("工作模式 / Working Mode:", self._mode_combo)
+
         layout.addWidget(cam_gb)
 
         # ---- Data processing settings ----
@@ -289,6 +295,7 @@ class SettingsTab(QWidget):
             "exposure_time_ms": self._exp_spin.value(),
             "temperature_c": self._temp_spin.value(),
             "fan_gear": self._fan_combo.currentData(),
+            "working_mode": self._mode_combo.currentData(),
             "row_groups_text": raw_text,
             "merge_factor": self._merge_spin.value(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),

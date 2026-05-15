@@ -277,6 +277,12 @@ class TUFRM_FORMATS(Enum):
     TUFRM_FMT_RGB888 = 0x12
 
 
+class TUGAIN_MODE(Enum):
+    TUGAIN_HDR = 0x00
+    TUGAIN_HIGH = 0x01
+    TUGAIN_LOW = 0x02
+
+
 # ---------------------------------------------------------------------------
 # Structures
 # ---------------------------------------------------------------------------

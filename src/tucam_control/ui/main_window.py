@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
             "exposure_time_ms": 1000.0,
             "temperature_c": -10.0,
             "fan_gear": 2,
+            "working_mode": 0,
             "row_groups_text": "",
             "merge_factor": 1,
             "arpls_enabled": True,
@@ -164,6 +165,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._camera.set_fan_gear(s["fan_gear"])
+        except Exception:
+            pass
+        try:
+            self._camera.set_working_mode(s.get("working_mode", 0))
         except Exception:
             pass
 

@@ -33,6 +33,7 @@ from .TUCam import (
     TUCAM_REG_RW,
     TUCAM_VALUE_INFO,
     TUCAMRET,
+    TUGAIN_MODE,
     TUIMG_FORMATS,
     TUCAM_Api_Init,
     TUCAM_Api_Uninit,
@@ -321,6 +322,28 @@ class CameraController:
         val = c_int32(0)
         TUCAM_Capa_GetValue(
             self._hcam, TUCAM_IDCAPA.TUIDC_FAN_GEAR.value, byref(val)
+        )
+        return val.value
+
+    # ------------------------------------------------------------------
+    # Working Mode  (TUIDC_IMGMODESELECT)
+    # ------------------------------------------------------------------
+
+    MODE_LABELS = {0: "HDR", 1: "High Gain", 2: "Low Gain"}
+
+    def set_working_mode(self, mode: int) -> None:
+        """Set working mode. 0=HDR, 1=High Gain, 2=Low Gain."""
+        self._check_open()
+        if mode not in (0, 1, 2):
+            raise ValueError(f"Invalid mode: {mode}")
+        TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_IMGMODESELECT.value, mode)
+
+    def get_working_mode(self) -> int:
+        """Get current working mode."""
+        self._check_open()
+        val = c_int32(0)
+        TUCAM_Capa_GetValue(
+            self._hcam, TUCAM_IDCAPA.TUIDC_IMGMODESELECT.value, byref(val)
         )
         return val.value
 
