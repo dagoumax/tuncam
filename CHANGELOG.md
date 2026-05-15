@@ -2,6 +2,14 @@
 
 ## 2026-05-15
 
+### 工作模式切换
+- 设置页新增工作模式选择：HDR / High Gain / Low Gain
+- 通过 `TUIDC_IMGMODESELECT` 切换，HG 模式读噪最低 1.6e⁻
+
+### 设备状态监控
+- 设置页新增「设备状态」区域：连接状态、设备名称、三路温度
+- `app.aboutToQuit` 确保退出时正确释放相机线程
+
 ### 架构整理
 - 抽取 `_mpl_style.py` 共享模块（CJK 字体、COLORS、WINDOW_SIZE、fix_tick_labels）
 - 全面代码审查：修复 2 处 Runtime Error、2 处逻辑 Bug、7 处未使用导入
