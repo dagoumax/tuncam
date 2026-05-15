@@ -45,6 +45,12 @@ class ConcentrationTab(QWidget):
         self._dirty: bool = False
         self._new_data: bool = False
         self._last_export_dir: str = ""
+
+        from PySide6.QtCore import QTimer
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(300)
+        self._redraw_timer.timeout.connect(self._do_redraw)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -71,13 +77,13 @@ class ConcentrationTab(QWidget):
 
         ctrl_layout.addWidget(QLabel("行组 / Row Group:"))
         self._group_combo = QComboBox()
-        self._group_combo.currentIndexChanged.connect(self._redraw)
+        self._group_combo.currentIndexChanged.connect(self._do_redraw)
         ctrl_layout.addWidget(self._group_combo)
 
         ctrl_layout.addWidget(QLabel("气体 / Gas:"))
         self._gas_combo = QComboBox()
         self._gas_combo.addItem("全部 / All", "all")
-        self._gas_combo.currentIndexChanged.connect(self._redraw)
+        self._gas_combo.currentIndexChanged.connect(self._do_redraw)
         ctrl_layout.addWidget(self._gas_combo)
 
         btn_row = QHBoxLayout()
@@ -169,7 +175,7 @@ class ConcentrationTab(QWidget):
         self._batch_idx = 0
         self._table.setRowCount(0)
         self._total_label.setText("浓度总和 / Total: --")
-        self._redraw()
+        self._do_redraw()
 
     # ------------------------------------------------------------------
     # Internal
@@ -205,6 +211,11 @@ class ConcentrationTab(QWidget):
         self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
 
     def _redraw(self) -> None:
+        """Request a redraw (debounced — batches rapid calls)."""
+        self._dirty = True
+        self._redraw_timer.start()
+
+    def _do_redraw(self) -> None:
         self._dirty = True
         if not self.isVisible():
             return
@@ -337,7 +348,7 @@ class ConcentrationTab(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self._dirty:
-            self._redraw()
+            self._do_redraw()
 
     def _on_clear(self) -> None:
         self.clear_history()

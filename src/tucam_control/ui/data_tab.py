@@ -40,6 +40,12 @@ class DataTab(QWidget):
         self._cursor_line = None
         self._cursor_annot = None
         self._dirty: bool = False
+
+        from PySide6.QtCore import QTimer
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(300)
+        self._redraw_timer.timeout.connect(self._do_redraw)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -60,7 +66,7 @@ class DataTab(QWidget):
 
         self._show_baseline_cb = QCheckBox("显示基线 / Show Baseline")
         self._show_baseline_cb.setChecked(False)
-        self._show_baseline_cb.stateChanged.connect(self._redraw)
+        self._show_baseline_cb.stateChanged.connect(self._do_redraw)
         ctrl.addWidget(self._show_baseline_cb)
 
         self._cursor_toggle_cb = QCheckBox("光标 / Cursor")
@@ -130,7 +136,7 @@ class DataTab(QWidget):
         if dlg.exec():
             self._calib_coeffs = dlg.result_coeffs
             self.calibration_changed.emit(self._calib_coeffs)
-            self._redraw()
+            self._do_redraw()
 
     def _x_axis_values(self, n_cols: int) -> np.ndarray:
         pixels = np.arange(n_cols)
@@ -146,7 +152,7 @@ class DataTab(QWidget):
     def _on_cursor_toggle(self) -> None:
         if not self._cursor_toggle_cb.isChecked():
             self._cursor_on = False
-        self._redraw()
+        self._do_redraw()
 
     def _on_click(self, event) -> None:
         import traceback
@@ -160,7 +166,7 @@ class DataTab(QWidget):
             if event.button == MouseButton.RIGHT:
                 self._cursor_on = False
                 self._cursor_label.setText("光标: 已关闭 / Cursor off")
-                self._redraw()
+                self._do_redraw()
                 return
             if event.button == MouseButton.LEFT:
                 if event.xdata is None:
@@ -170,7 +176,7 @@ class DataTab(QWidget):
                 self._cursor_idx = max(0, min(int(round(px)), n_data - 1))
                 self._cursor_on = True
                 self._canvas.setFocus()
-                self._redraw()
+                self._do_redraw()
         except Exception as e:
             traceback.print_exc()
 
@@ -186,7 +192,7 @@ class DataTab(QWidget):
             self._cursor_on = False
         else:
             return
-        self._redraw()
+        self._do_redraw()
 
     # ------------------------------------------------------------------
     # Plotting
@@ -206,18 +212,23 @@ class DataTab(QWidget):
     def _on_mode_changed(self) -> None:
         self._group_combo.setEnabled(self._mode_combo.currentData() == "single")
         self._cursor_on = False
-        self._redraw()
+        self._do_redraw()
 
     def _on_group_changed(self) -> None:
         self._cursor_on = False
-        self._redraw()
+        self._do_redraw()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self._dirty:
-            self._redraw()
+            self._do_redraw()
 
     def _redraw(self) -> None:
+        """Request a redraw (debounced)."""
+        self._dirty = True
+        self._redraw_timer.start()
+
+    def _do_redraw(self) -> None:
         self._dirty = True
         if not self.isVisible():
             return
