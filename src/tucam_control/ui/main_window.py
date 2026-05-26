@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,8 @@ class MainWindow(QMainWindow):
             "temperature_c": -10.0,
             "fan_gear": 2,
             "working_mode": 0,
+            "auto_save": False,
+            "save_dir": r"C:\tucam_data",
             "row_groups_text": "",
             "merge_factor": 1,
             "arpls_enabled": True,
@@ -278,6 +281,34 @@ class MainWindow(QMainWindow):
         self.status_changed.emit(f"批量测试结束 / Batch finished ({len(self._batch_images)} images)")
 
     # ------------------------------------------------------------------
+    # Auto-save helper
+    # ------------------------------------------------------------------
+
+    def _ensure_save_dir(self) -> str | None:
+        d = self._settings.get("save_dir", r"C:\tucam_data")
+        try:
+            Path(d).mkdir(parents=True, exist_ok=True)
+            return d
+        except Exception as exc:
+            QMessageBox.warning(self, "存储错误 / Save Error",
+                                f"无法创建存储目录：\n{d}\n\n{exc}")
+            return None
+
+    def _auto_save_frame(self) -> None:
+        if not self._settings.get("auto_save", False):
+            return
+        save_dir = self._ensure_save_dir()
+        if save_dir is None:
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        path = f"{save_dir}\\{ts}.tif"
+        try:
+            self._camera.save_image(path)
+            self.status_changed.emit(f"已自动存储 / Auto saved: {path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "自动存储失败 / Auto Save Failed", str(exc))
+
+    # ------------------------------------------------------------------
     # Acquisition callbacks
     # ------------------------------------------------------------------
 
@@ -294,6 +325,7 @@ class MainWindow(QMainWindow):
             arr = self._camera.capture_single()
             if arr is not None:
                 self._acq_tab.display_frame(arr)
+                self._auto_save_frame()
                 self.status_changed.emit("单帧采集完成 / Single frame captured")
             else:
                 QMessageBox.warning(
@@ -376,6 +408,7 @@ class MainWindow(QMainWindow):
         arr = self._camera.wait_for_frame(timeout_ms=timeout)
         if arr is not None:
             self._acq_tab.display_frame(arr)
+            self._auto_save_frame()
         else:
             if not self._camera.is_connected():
                 self._on_device_lost()

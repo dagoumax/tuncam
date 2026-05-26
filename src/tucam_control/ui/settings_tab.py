@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -74,6 +75,17 @@ class SettingsTab(QWidget):
         self._mode_combo.addItem("High Gain (高灵敏度)", 1)
         self._mode_combo.addItem("Low Gain (高满阱)", 2)
         cam_form.addRow("工作模式 / Working Mode:", self._mode_combo)
+
+        self._auto_save_cb = QCheckBox("采集后自动存储 / Auto Save After Capture")
+        cam_form.addRow("", self._auto_save_cb)
+
+        save_path_row = QHBoxLayout()
+        self._save_dir_edit = QLineEdit(r"C:\tucam_data")
+        self._btn_browse = QPushButton("浏览...")
+        self._btn_browse.clicked.connect(self._on_browse_save_dir)
+        save_path_row.addWidget(self._save_dir_edit)
+        save_path_row.addWidget(self._btn_browse)
+        cam_form.addRow("存储路径 / Save Path:", save_path_row)
 
         layout.addWidget(cam_gb)
 
@@ -235,6 +247,11 @@ class SettingsTab(QWidget):
         else:
             QMessageBox.information(self, "提示 / Info", "请先点击选中要删除的行。")
 
+    def _on_browse_save_dir(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择存储文件夹 / Select Save Directory")
+        if folder:
+            self._save_dir_edit.setText(folder)
+
     def update_device_status(self, info: CameraInfo | None) -> None:
         if info is None:
             self._status_connect.setText("未连接 / Disconnected")
@@ -296,6 +313,8 @@ class SettingsTab(QWidget):
             "temperature_c": self._temp_spin.value(),
             "fan_gear": self._fan_combo.currentData(),
             "working_mode": self._mode_combo.currentData(),
+            "auto_save": self._auto_save_cb.isChecked(),
+            "save_dir": self._save_dir_edit.text().strip(),
             "row_groups_text": raw_text,
             "merge_factor": self._merge_spin.value(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),
