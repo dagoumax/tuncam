@@ -1042,6 +1042,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pillow" },
     { name = "pyside6" },
     { name = "python-docx" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1052,6 +1053,7 @@ dependencies = [
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.7" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "pillow", specifier = ">=10.0" },
     { name = "pyside6", specifier = ">=6.5" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "scipy", specifier = ">=1.10" },

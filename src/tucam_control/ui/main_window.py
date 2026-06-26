@@ -75,7 +75,7 @@ class _ProcessingTask(QRunnable):
 
             result = processor.process(self._frame)
             labels = [
-                f"琛?{s}-{e}"
+                f"行 {s}-{e}"
                 for s, e in (row_groups if row_groups else [(1, self._frame.shape[0])])
             ]
             gas_names = [g.name for g in analyzer.gases]
@@ -647,8 +647,8 @@ class MainWindow(QMainWindow):
         self._processing_task = None
         QMessageBox.warning(
             self,
-            "澶勭悊閿欒 / Processing Error",
-            f"鏁版嵁澶勭悊澶辫触锛歕n{message}",
+            "处理错误 / Processing Error",
+            f"数据处理失败：\n{message}",
         )
         self._start_pending_processing()
 

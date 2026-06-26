@@ -16,7 +16,7 @@ from ctypes import (
     pointer,
     string_at,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
