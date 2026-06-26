@@ -26,6 +26,9 @@ from .data_tab import DataTab
 from .concentration_tab import ConcentrationTab
 
 
+DEFAULT_SAVE_DIR = str(Path.home() / "Documents" / "tucam_data")
+
+
 class MainWindow(QMainWindow):
     """Top-level application window."""
 
@@ -46,7 +49,7 @@ class MainWindow(QMainWindow):
             "fan_gear": 2,
             "working_mode": 0,
             "auto_save": False,
-            "save_dir": r"C:\tucam_data",
+            "save_dir": DEFAULT_SAVE_DIR,
             "row_groups_text": "",
             "merge_factor": 1,
             "arpls_enabled": True,
@@ -285,7 +288,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _ensure_save_dir(self) -> str | None:
-        d = self._settings.get("save_dir", r"C:\tucam_data")
+        d = self._settings.get("save_dir", DEFAULT_SAVE_DIR)
         try:
             Path(d).mkdir(parents=True, exist_ok=True)
             return d

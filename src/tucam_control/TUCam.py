@@ -5,18 +5,23 @@ Loads TUCam.dll from the project's lib/x64/ directory.
 """
 
 import os
+from pathlib import Path
 from ctypes import *
 from enum import Enum
 
 # Locate DLLs relative to this file
-_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(_PACKAGE_DIR))
-_DLL_PATH = os.path.join(_PROJECT_ROOT, "lib", "x64", "TUCam.dll")
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _PACKAGE_DIR.parents[1]
+_DLL_DIR = _PROJECT_ROOT / "lib" / "x64"
+_DLL_PATH = _DLL_DIR / "TUCam.dll"
 
-if not os.path.exists(_DLL_PATH):
+if not _DLL_PATH.exists():
     raise FileNotFoundError(f"TUCam.dll not found at {_DLL_PATH}")
 
-TUSDKdll = OleDLL(_DLL_PATH)
+if hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(str(_DLL_DIR))
+
+TUSDKdll = OleDLL(str(_DLL_PATH))
 
 
 # ---------------------------------------------------------------------------

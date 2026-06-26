@@ -199,12 +199,11 @@ class DataProcessor:
         """
         self._last_image = image.copy()
         h, w = image.shape
-        if not self._row_groups:
-            self._row_groups = [(1, h)]
+        row_groups = self._row_groups or [(1, h)]
 
         # Row grouping → 1-D spectra
         spectra: list[np.ndarray] = []
-        for start, end in self._row_groups:
+        for start, end in row_groups:
             s_idx = start - 1
             e_idx = end
             if e_idx > h:
@@ -218,6 +217,8 @@ class DataProcessor:
         # Column merging
         if self._merge_factor > 1:
             n = self._merge_factor
+            if n > w:
+                raise ValueError(f"Merge factor {n} exceeds image width {w}")
             new_w = w // n
             merged = merged[:, : new_w * n].reshape(merged.shape[0], new_w, n).mean(axis=2)
 
@@ -273,7 +274,7 @@ class DataProcessor:
         if not text:
             return []
         normalized = text.replace("\n", ",").replace("\r", ",").replace(" ", ",")
-        normalized = normalized.replace("，", ",")   # Chinese comma support
+        normalized = normalized.replace("，", ",").replace("、", ",")
         groups: list[tuple[int, int]] = []
         for part in normalized.split(","):
             part = part.strip()

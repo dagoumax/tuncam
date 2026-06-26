@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -27,6 +29,9 @@ from PySide6.QtWidgets import (
 from ..camera import CameraController, CameraInfo
 from ..data_processor import DataProcessor
 from ..gas_analyzer import GasAnalyzer, GasConfig
+
+
+DEFAULT_SAVE_DIR = str(Path.home() / "Documents" / "tucam_data")
 
 
 class SettingsTab(QWidget):
@@ -80,7 +85,7 @@ class SettingsTab(QWidget):
         cam_form.addRow("", self._auto_save_cb)
 
         save_path_row = QHBoxLayout()
-        self._save_dir_edit = QLineEdit(r"C:\tucam_data")
+        self._save_dir_edit = QLineEdit(DEFAULT_SAVE_DIR)
         self._btn_browse = QPushButton("浏览...")
         self._btn_browse.clicked.connect(self._on_browse_save_dir)
         save_path_row.addWidget(self._save_dir_edit)
