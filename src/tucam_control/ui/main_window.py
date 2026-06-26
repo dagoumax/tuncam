@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import copy
+import time
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QMainWindow,
     QTabWidget,
@@ -27,6 +29,70 @@ from .concentration_tab import ConcentrationTab
 
 
 DEFAULT_SAVE_DIR = str(Path.home() / "Documents" / "tucam_data")
+CAPTURE_POLL_TIMEOUT_MS = 50
+
+
+class _ProcessingSignals(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class _ProcessingTask(QRunnable):
+    def __init__(
+        self,
+        frame: np.ndarray,
+        settings: dict,
+        gas_configs: list,
+        generation: int,
+        batch_mode: bool,
+    ) -> None:
+        super().__init__()
+        self.signals = _ProcessingSignals()
+        self._frame = frame
+        self._settings = settings
+        self._gas_configs = gas_configs
+        self._generation = generation
+        self._batch_mode = batch_mode
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            started = time.perf_counter()
+            row_groups = DataProcessor.parse_groups(self._settings.get("row_groups_text", ""))
+
+            processor = DataProcessor()
+            processor.row_groups = row_groups
+            processor.merge_factor = self._settings.get("merge_factor", 1)
+            processor.arPLS_enabled = self._settings.get("arpls_enabled", False)
+            processor.baseline_mode = self._settings.get("arpls_mode", "raw")
+            processor.arPLS_lam = self._settings.get("arpls_lam", 1e5)
+            processor.arPLS_max_iter = self._settings.get("arpls_max_iter", 50)
+            processor.arPLS_tol = self._settings.get("arpls_tol", 1e-6)
+
+            analyzer = GasAnalyzer()
+            analyzer.gases = self._gas_configs
+            analyzer.merge_factor = processor.merge_factor
+
+            result = processor.process(self._frame)
+            labels = [
+                f"琛?{s}-{e}"
+                for s, e in (row_groups if row_groups else [(1, self._frame.shape[0])])
+            ]
+            gas_names = [g.name for g in analyzer.gases]
+            all_results = analyzer.analyze_groups(result) if result.shape[0] > 0 else []
+
+            self.signals.finished.emit({
+                "generation": self._generation,
+                "duration_ms": (time.perf_counter() - started) * 1000,
+                "result": result,
+                "baseline": processor.last_baseline,
+                "labels": labels,
+                "gas_names": gas_names,
+                "all_results": all_results,
+                "mode": "index" if self._batch_mode else "time",
+            })
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -60,6 +126,13 @@ class MainWindow(QMainWindow):
         }
         self._was_connected = False
         self._disconnect_warned = False
+        self._last_frame: np.ndarray | None = None
+        self._processing_busy = False
+        self._pending_frame: np.ndarray | None = None
+        self._processing_task: _ProcessingTask | None = None
+        self._processing_generation = 0
+        self._processing_pool = QThreadPool(self)
+        self._processing_pool.setMaxThreadCount(1)
 
         self._setup_ui()
         self._connect_signals()
@@ -407,8 +480,7 @@ class MainWindow(QMainWindow):
     def _on_capture_poll(self) -> None:
         if not self._camera.is_capturing:
             return
-        timeout = max(1000, int(self._settings.get("exposure_time_ms", 1000)) + 500)
-        arr = self._camera.wait_for_frame(timeout_ms=timeout)
+        arr = self._camera.wait_for_frame(timeout_ms=CAPTURE_POLL_TIMEOUT_MS)
         if arr is not None:
             self._acq_tab.display_frame(arr)
             self._auto_save_frame()
@@ -500,6 +572,7 @@ class MainWindow(QMainWindow):
                 pass
 
         self._settings.update(updates)
+        self._processing_generation += 1
         if self._camera.is_open:
             self._apply_current_settings()
 
@@ -525,7 +598,66 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_frame_ready(self, arr: np.ndarray) -> None:
-        self._process_and_display(arr)
+        self._last_frame = arr.copy()
+        self._queue_frame_processing(arr)
+
+    def _queue_frame_processing(self, arr: np.ndarray) -> None:
+        if self._processing_busy:
+            self._pending_frame = arr.copy()
+            return
+
+        self._processing_busy = True
+        self._pending_frame = None
+        task = _ProcessingTask(
+            frame=arr.copy(),
+            settings=copy.deepcopy(self._settings),
+            gas_configs=copy.deepcopy(self._analyzer.gases),
+            generation=self._processing_generation,
+            batch_mode=self._batch_timer.isActive(),
+        )
+        task.signals.finished.connect(self._on_processing_finished)
+        task.signals.failed.connect(self._on_processing_failed)
+        self._processing_task = task
+        self._processing_pool.start(task)
+
+    @Slot(object)
+    def _on_processing_finished(self, payload: dict) -> None:
+        self._processing_busy = False
+        self._processing_task = None
+        if payload.get("generation") == self._processing_generation:
+            self._data_tab.set_row_labels(payload["labels"])
+            self._data_tab.display_array(payload["result"])
+            self._data_tab.set_baseline_data(payload["baseline"])
+
+            self._conc_tab.set_gas_names(payload["gas_names"])
+            if payload["all_results"]:
+                self._conc_tab.add_data_point(
+                    payload["all_results"],
+                    payload["labels"],
+                    mode=payload["mode"],
+                )
+            self.status_changed.emit(
+                f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
+            )
+        self._start_pending_processing()
+
+    @Slot(str)
+    def _on_processing_failed(self, message: str) -> None:
+        self._processing_busy = False
+        self._processing_task = None
+        QMessageBox.warning(
+            self,
+            "澶勭悊閿欒 / Processing Error",
+            f"鏁版嵁澶勭悊澶辫触锛歕n{message}",
+        )
+        self._start_pending_processing()
+
+    def _start_pending_processing(self) -> None:
+        if self._pending_frame is None:
+            return
+        frame = self._pending_frame
+        self._pending_frame = None
+        self._queue_frame_processing(frame)
 
     @Slot(object)
     def _on_calibration_changed(self, coeffs: np.ndarray | None) -> None:
@@ -536,6 +668,7 @@ class MainWindow(QMainWindow):
         for cfg in self._analyzer.gases:
             if cfg.raman_shift > 0:
                 cfg.position = pixel_from_raman(cfg.raman_shift, coeffs)
+        self._processing_generation += 1
         self._settings_tab.update_gas_table(self._analyzer.gases)
         self._reprocess_cached()
 
@@ -572,28 +705,8 @@ class MainWindow(QMainWindow):
 
     def _reprocess_cached(self) -> None:
         """Re-run full pipeline on cached image (for settings changes)."""
-        result = self._processor.reprocess()
-        if result is not None:
-            row_groups = self._processor.row_groups
-            labels = (
-                [f"行 {s}-{e}" for s, e in row_groups]
-                if row_groups
-                else [f"全图 {result.shape[1]} 列"]
-            )
-            self._data_tab.set_row_labels(labels)
-            self._data_tab.display_array(result)
-            self._data_tab.set_baseline_data(self._processor.last_baseline)
-
-            gas_names = [g.name for g in self._analyzer.gases]
-            self._conc_tab.set_gas_names(gas_names)
-            if result.shape[0] > 0:
-                all_results = self._analyzer.analyze_groups(result)
-                group_labels = [
-                    f"行 {s}-{e}"
-                    for s, e in (row_groups if row_groups else [(1, result.shape[0])])
-                ]
-                mode = "index" if self._batch_timer.isActive() else "time"
-                self._conc_tab.add_data_point(all_results, group_labels, mode=mode)
+        if self._last_frame is not None:
+            self._queue_frame_processing(self._last_frame)
 
     # ------------------------------------------------------------------
     # Close
@@ -603,6 +716,8 @@ class MainWindow(QMainWindow):
         self._refresh_timer.stop()
         self._capture_timer.stop()
         self._batch_timer.stop()
+        self._pending_frame = None
+        self._processing_pool.waitForDone(1000)
         try:
             self._camera.uninitialize()
         except Exception:
