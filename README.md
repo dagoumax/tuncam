@@ -42,6 +42,28 @@
 
 离线 TIF 测试模式不需要连接相机。
 
+## 已确认设备
+
+当前目标设备为 `Dhyana 95 V2`。根据厂商资料，该型号的关键参数如下：
+
+- 传感器：BSI sCMOS，Gpixel GSENSE400BSI
+- 分辨率：`2048 x 2048`
+- 像素尺寸：`11 um x 11 um`
+- 快门类型：Rolling
+- 曝光范围：`21 us ~ 10 s`
+- 数据接口：`USB 3.0` 或 `CameraLink`
+- 位深：`12 bit` / `16 bit`
+- 制冷方式：风冷、水冷
+- SDK：C、C++、C#、Python
+
+连接时需要先确认实际使用的是 `USB 3.0` 还是 `CameraLink`：
+
+- USB 连接应使用主机后置 USB 3.0 接口，避免 HUB、扩展坞和过长延长线。
+- CameraLink 连接需要采集卡、两根 CameraLink 线、采集卡驱动，并确认线缆接口顺序。
+- 设备管理器中 USB 相机应出现在图像设备下且无黄色警告标志。
+- CameraLink 采集卡应正常识别，厂商资料中推荐 Active Silicon FireBird 采集卡。
+- 如果厂商 Mosaic 或 SamplePro 不能正常出图，应优先排查驱动、接口、电源和硬件连接，再排查本程序。
+
 ## 安装与启动
 
 推荐使用项目内已有的虚拟环境或 `uv` 安装依赖。
