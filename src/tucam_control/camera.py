@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .debug_log import get_debug_logger
 from .TUCam import (
     TUCAM_CAPTURE_MODES,
     TUCAM_FRAME,
@@ -29,11 +30,12 @@ from .TUCam import (
     TUCAM_IDPROP,
     TUCAM_INIT,
     TUCAM_OPEN,
+    TUCAM_CAPA_ATTR,
     TUCAM_PROP_ATTR,
     TUCAM_REG_RW,
     TUCAM_VALUE_INFO,
     TUCAMRET,
-    TUGAIN_MODE,
+    TUFRM_FORMATS,
     TUIMG_FORMATS,
     TUCAM_Api_Init,
     TUCAM_Api_Uninit,
@@ -44,6 +46,7 @@ from .TUCam import (
     TUCAM_Cap_Start,
     TUCAM_Cap_Stop,
     TUCAM_Capa_GetValue,
+    TUCAM_Capa_GetAttr,
     TUCAM_Capa_SetValue,
     TUCAM_Dev_Close,
     TUCAM_Dev_GetInfo,
@@ -53,7 +56,12 @@ from .TUCam import (
     TUCAM_Prop_GetValue,
     TUCAM_Prop_SetValue,
     TUCAM_Reg_Read,
+    describe_tucam_ret,
+    sdk_diagnostics,
 )
+
+
+log = get_debug_logger("camera")
 
 
 @dataclass
@@ -113,11 +121,15 @@ class CameraController:
     def initialize(self) -> int:
         """Initialize the TUCam API. Returns the number of cameras found."""
         if self._initialized:
+            log.debug("TUCAM_Api_Init skipped; already initialized cam_count=%s", self._cam_count)
             return self._cam_count
+        log.info("SDK diagnostics: %s", sdk_diagnostics())
+        log.info("Calling TUCAM_Api_Init")
         init_param = TUCAM_INIT(0, b"./")
         result = TUCAM_Api_Init(pointer(init_param), 5000)
+        log.info("TUCAM_Api_Init returned %s; cam_count=%s", describe_tucam_ret(result), init_param.uiCamCount)
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"TUCAM_Api_Init failed: {result}")
+            raise RuntimeError(f"TUCAM_Api_Init failed: {describe_tucam_ret(result)}")
         self._cam_count = init_param.uiCamCount
         self._initialized = True
         return self._cam_count
@@ -126,10 +138,12 @@ class CameraController:
         """Open camera at *index*."""
         if not self._initialized:
             raise RuntimeError("API not initialized")
+        log.info("Calling TUCAM_Dev_Open index=%s", index)
         open_param = TUCAM_OPEN(index, 0)
         result = TUCAM_Dev_Open(pointer(open_param))
+        log.info("TUCAM_Dev_Open returned %s; handle=%s", describe_tucam_ret(result), open_param.hIdxTUCam)
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"TUCAM_Dev_Open failed: {result}")
+            raise RuntimeError(f"TUCAM_Dev_Open failed: {describe_tucam_ret(result)}")
         if open_param.hIdxTUCam == 0:
             raise RuntimeError("Camera handle is null after open")
         self._hcam = open_param.hIdxTUCam
@@ -139,8 +153,10 @@ class CameraController:
         """Close the currently open camera."""
         if not self._opened or self._hcam == 0:
             return
+        log.info("Closing camera handle=%s", self._hcam)
         self.stop_capture()
-        TUCAM_Dev_Close(self._hcam)
+        result = TUCAM_Dev_Close(self._hcam)
+        log.info("TUCAM_Dev_Close returned %s", describe_tucam_ret(result))
         self._hcam = 0
         self._opened = False
 
@@ -148,7 +164,9 @@ class CameraController:
         """Uninitialize the TUCam API."""
         self.close()
         if self._initialized:
-            TUCAM_Api_Uninit()
+            log.info("Calling TUCAM_Api_Uninit")
+            result = TUCAM_Api_Uninit()
+            log.info("TUCAM_Api_Uninit returned %s", describe_tucam_ret(result))
             self._initialized = False
             self._cam_count = 0
 
@@ -174,12 +192,16 @@ class CameraController:
         def _read_str(info_id: TUCAM_IDINFO, buf_size: int = 256) -> str:
             buf = create_string_buffer(buf_size)
             vi = TUCAM_VALUE_INFO(info_id.value, 0, cast(buf, c_char_p), buf_size)
-            TUCAM_Dev_GetInfo(self._hcam, pointer(vi))
+            result = TUCAM_Dev_GetInfo(self._hcam, pointer(vi))
+            if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+                log.debug("TUCAM_Dev_GetInfo(%s) returned %s", info_id.name, describe_tucam_ret(result))
             return buf.value.decode(enc, errors="replace") if buf.value else ""
 
         def _read_int(info_id: TUCAM_IDINFO) -> int:
             vi = TUCAM_VALUE_INFO(info_id.value, 0, 0, 0)
-            TUCAM_Dev_GetInfo(self._hcam, pointer(vi))
+            result = TUCAM_Dev_GetInfo(self._hcam, pointer(vi))
+            if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+                log.debug("TUCAM_Dev_GetInfo(%s) returned %s", info_id.name, describe_tucam_ret(result))
             return vi.nValue
 
         info.model = _read_str(TUCAM_IDINFO.TUIDI_CAMERA_MODEL)
@@ -243,6 +265,16 @@ class CameraController:
         except Exception:
             info.serial_number = "N/A"
 
+        log.debug(
+            "Device info: model=%r serial=%r api=%r driver=%r size=%sx%s channels=%s",
+            info.model,
+            info.serial_number,
+            info.api_version,
+            info.driver_version,
+            info.sensor_width,
+            info.sensor_height,
+            info.channels,
+        )
         return info
 
     # ------------------------------------------------------------------
@@ -252,10 +284,61 @@ class CameraController:
     def set_exposure_time(self, time_ms: float) -> None:
         """Set exposure time in milliseconds."""
         self._check_open()
-        TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_ATEXPOSURE.value, 0)
-        TUCAM_Prop_SetValue(
+        result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_ATEXPOSURE.value, 0)
+        log.debug("TUCAM_Capa_SetValue(ATEXPOSURE=0) returned %s", describe_tucam_ret(result))
+        result = TUCAM_Prop_SetValue(
             self._hcam, TUCAM_IDPROP.TUIDP_EXPOSURETM.value, c_double(time_ms), 0
         )
+        log.info("Set exposure %.3f ms returned %s", time_ms, describe_tucam_ret(result))
+
+    def configure_scientific_frame_format(self) -> None:
+        """Prefer raw/high-bit-depth frames over RGB preview frames."""
+        self._check_open()
+
+        def _query_capa_attr(capa: TUCAM_IDCAPA) -> TUCAM_CAPA_ATTR:
+            attr = TUCAM_CAPA_ATTR()
+            attr.idCapa = capa.value
+            result = TUCAM_Capa_GetAttr(self._hcam, pointer(attr))
+            log.info(
+                "%s attr returned %s; min=%s max=%s default=%s step=%s",
+                capa.name,
+                describe_tucam_ret(result),
+                attr.nValMin,
+                attr.nValMax,
+                attr.nValDft,
+                attr.nValStep,
+            )
+            if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+                raise RuntimeError(f"Get {capa.name} attr failed: {describe_tucam_ret(result)}")
+            return attr
+
+        try:
+            attr = _query_capa_attr(TUCAM_IDCAPA.TUIDC_DATAFORMAT)
+            preferred_formats = (
+                TUFRM_FORMATS.TUFRM_FMT_RAW.value,
+                TUFRM_FORMATS.TUFRM_FMT_USUAl.value,
+            )
+            for fmt in preferred_formats:
+                if attr.nValMin <= fmt <= attr.nValMax:
+                    result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_DATAFORMAT.value, fmt)
+                    log.info("Set data format %s returned %s", fmt, describe_tucam_ret(result))
+                    break
+            val = c_int32(0)
+            result = TUCAM_Capa_GetValue(self._hcam, TUCAM_IDCAPA.TUIDC_DATAFORMAT.value, byref(val))
+            log.info("Data format readback returned %s; value=%s", describe_tucam_ret(result), val.value)
+        except Exception as exc:
+            log.warning("Could not configure data format: %s", exc)
+
+        try:
+            attr = _query_capa_attr(TUCAM_IDCAPA.TUIDC_BITOFDEPTH)
+            target_depth = attr.nValMax
+            result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_BITOFDEPTH.value, target_depth)
+            log.info("Set bit depth %s returned %s", target_depth, describe_tucam_ret(result))
+            val = c_int32(0)
+            result = TUCAM_Capa_GetValue(self._hcam, TUCAM_IDCAPA.TUIDC_BITOFDEPTH.value, byref(val))
+            log.info("Bit depth readback returned %s; value=%s", describe_tucam_ret(result), val.value)
+        except Exception as exc:
+            log.warning("Could not configure bit depth: %s", exc)
 
     def get_exposure_time(self) -> float:
         """Get current exposure time in milliseconds."""
@@ -282,10 +365,12 @@ class CameraController:
     def set_temperature_target(self, temp_c: float) -> None:
         """Set target temperature in Celsius. Enables TEC automatically."""
         self._check_open()
-        TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_ENABLETEC.value, 1)
-        TUCAM_Prop_SetValue(
+        result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_ENABLETEC.value, 1)
+        log.debug("TUCAM_Capa_SetValue(ENABLETEC=1) returned %s", describe_tucam_ret(result))
+        result = TUCAM_Prop_SetValue(
             self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value, c_double(temp_c), 0
         )
+        log.info("Set temperature %.3f C returned %s", temp_c, describe_tucam_ret(result))
 
     def get_temperature_target(self) -> float:
         """Get current target temperature in Celsius."""
@@ -314,15 +399,38 @@ class CameraController:
         self._check_open()
         if gear < 1 or gear > 4:
             raise ValueError("Fan gear must be 1-4 (gear 0 / off is not permitted)")
-        TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_FAN_GEAR.value, gear)
+        try:
+            attr = TUCAM_CAPA_ATTR()
+            attr.idCapa = TUCAM_IDCAPA.TUIDC_FAN_GEAR.value
+            attr_result = TUCAM_Capa_GetAttr(self._hcam, pointer(attr))
+            log.info(
+                "Fan gear attr returned %s; min=%s max=%s default=%s step=%s",
+                describe_tucam_ret(attr_result),
+                attr.nValMin,
+                attr.nValMax,
+                attr.nValDft,
+                attr.nValStep,
+            )
+        except Exception as exc:
+            log.warning("Failed to query fan gear attr: %s", exc)
+        result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_FAN_GEAR.value, gear)
+        log.info("Set fan gear %s returned %s", gear, describe_tucam_ret(result))
+        try:
+            current = self.get_fan_gear()
+            log.info("Fan gear readback after set: %s", current)
+        except Exception as exc:
+            log.warning("Fan gear readback failed after set: %s", exc)
 
     def get_fan_gear(self) -> int:
         """Get current fan gear."""
         self._check_open()
         val = c_int32(0)
-        TUCAM_Capa_GetValue(
+        result = TUCAM_Capa_GetValue(
             self._hcam, TUCAM_IDCAPA.TUIDC_FAN_GEAR.value, byref(val)
         )
+        log.debug("TUCAM_Capa_GetValue(FAN_GEAR) returned %s; value=%s", describe_tucam_ret(result), val.value)
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get fan gear failed: {describe_tucam_ret(result)}")
         return val.value
 
     # ------------------------------------------------------------------
@@ -336,7 +444,8 @@ class CameraController:
         self._check_open()
         if mode not in (0, 1, 2):
             raise ValueError(f"Invalid mode: {mode}")
-        TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_IMGMODESELECT.value, mode)
+        result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_IMGMODESELECT.value, mode)
+        log.info("Set working mode %s returned %s", mode, describe_tucam_ret(result))
 
     def get_working_mode(self) -> int:
         """Get current working mode."""
@@ -357,12 +466,14 @@ class CameraController:
         self._frame.pBuffer = 0
         self._frame.uiRsdSize = 1
         result = TUCAM_Buf_Alloc(self._hcam, pointer(self._frame))
+        log.info("TUCAM_Buf_Alloc returned %s", describe_tucam_ret(result))
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Buffer alloc failed: {result}")
+            raise RuntimeError(f"Buffer alloc failed: {describe_tucam_ret(result)}")
 
     def _release_buffer(self) -> None:
         if self._frame is not None:
-            TUCAM_Buf_Release(self._hcam)
+            result = TUCAM_Buf_Release(self._hcam)
+            log.debug("TUCAM_Buf_Release returned %s", describe_tucam_ret(result))
             self._frame = None
 
     def start_capture(self) -> None:
@@ -372,17 +483,20 @@ class CameraController:
         result = TUCAM_Cap_Start(
             self._hcam, TUCAM_CAPTURE_MODES.TUCCM_SEQUENCE.value
         )
+        log.info("TUCAM_Cap_Start(SEQUENCE) returned %s", describe_tucam_ret(result))
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
             self._release_buffer()
-            raise RuntimeError(f"Capture start failed: {result}")
+            raise RuntimeError(f"Capture start failed: {describe_tucam_ret(result)}")
         self._capturing = True
 
     def stop_capture(self) -> None:
         """Stop capture and release buffer."""
         if not self._capturing:
             return
-        TUCAM_Buf_AbortWait(self._hcam)
-        TUCAM_Cap_Stop(self._hcam)
+        result = TUCAM_Buf_AbortWait(self._hcam)
+        log.debug("TUCAM_Buf_AbortWait returned %s", describe_tucam_ret(result))
+        result = TUCAM_Cap_Stop(self._hcam)
+        log.info("TUCAM_Cap_Stop returned %s", describe_tucam_ret(result))
         self._capturing = False
         self._release_buffer()
 
@@ -397,9 +511,41 @@ class CameraController:
 
         result = TUCAM_Buf_WaitForFrame(self._hcam, pointer(self._frame), timeout_ms)
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            if result.value != TUCAMRET.TUCAMRET_TIMEOUT.value:
+                log.warning("TUCAM_Buf_WaitForFrame returned %s", describe_tucam_ret(result))
             return None
 
-        return self._frame_to_array(self._frame)
+        log.debug(
+            (
+                "Frame received: index=%s size=%sx%s width_step=%s depth=%s "
+                "format=%s channels=%s elem_bytes=%s format_get=%s "
+                "header=%s offset=%s img_size=%s rsd_size=%s hst_size=%s"
+            ),
+            self._frame.uiIndex,
+            self._frame.usWidth,
+            self._frame.usHeight,
+            self._frame.uiWidthStep,
+            self._frame.ucDepth,
+            self._frame.ucFormat,
+            self._frame.ucChannels,
+            self._frame.ucElemBytes,
+            self._frame.ucFormatGet,
+            self._frame.usHeader,
+            self._frame.usOffset,
+            self._frame.uiImgSize,
+            self._frame.uiRsdSize,
+            self._frame.uiHstSize,
+        )
+        arr = self._frame_to_array(self._frame)
+        log.info(
+            "Frame array stats: shape=%s dtype=%s min=%s max=%s mean=%.3f",
+            arr.shape,
+            arr.dtype,
+            int(arr.min()) if arr.size else "n/a",
+            int(arr.max()) if arr.size else "n/a",
+            float(arr.mean()) if arr.size else 0.0,
+        )
+        return arr
 
     def capture_single(self) -> np.ndarray | None:
         """
@@ -421,19 +567,41 @@ class CameraController:
         """Extract pixel data from a TUCAM_FRAME into a 2-D numpy array."""
         w, h = frame.usWidth, frame.usHeight
         elem_bytes = frame.ucElemBytes
-        header = frame.usHeader
         total_size = frame.uiImgSize
+        row_step = frame.uiWidthStep or (w * max(1, elem_bytes))
+        channels = frame.ucChannels or max(1, row_step // max(1, w * max(1, elem_bytes)))
+        data_offset = frame.usOffset or frame.usHeader
+        payload_size = min(total_size, row_step * h) if row_step > 0 else total_size
 
-        buf = create_string_buffer(total_size)
-        ptr_data = c_void_p(frame.pBuffer + header)
-        memmove(buf, ptr_data, total_size)
+        buf = create_string_buffer(payload_size)
+        ptr_data = c_void_p(frame.pBuffer + data_offset)
+        memmove(buf, ptr_data, payload_size)
 
         if elem_bytes == 1:
-            arr = np.frombuffer(buf, dtype=np.uint8, count=w * h)
-        else:
-            arr = np.frombuffer(buf, dtype=np.uint16, count=w * h)
+            raw = np.frombuffer(buf, dtype=np.uint8, count=payload_size)
+            if row_step >= w * channels and channels > 1:
+                rows = raw[: row_step * h].reshape((h, row_step))
+                planes = rows[:, : w * channels].reshape((h, w, channels))
+                arr = planes.max(axis=2)
+                log.debug("Converted multi-channel uint8 frame using max projection channels=%s", channels)
+                return arr.copy()
+            arr = raw[: w * h].reshape((h, w))
+            return arr.copy()
 
-        return arr.reshape((h, w))
+        bytes_per_pixel = max(2, elem_bytes)
+        if row_step >= w * bytes_per_pixel:
+            raw = np.frombuffer(buf, dtype=np.uint8, count=payload_size)
+            rows = raw[: row_step * h].reshape((h, row_step))
+            pixel_bytes = rows[:, : w * bytes_per_pixel].reshape((h, w, bytes_per_pixel))
+            if bytes_per_pixel == 2:
+                arr = pixel_bytes.reshape((h, w * 2)).view("<u2").reshape((h, w))
+            else:
+                arr32 = pixel_bytes.astype(np.uint32)
+                arr = arr32[:, :, 0] | (arr32[:, :, 1] << 8) | (arr32[:, :, 2] << 16)
+            return arr.copy()
+
+        arr = np.frombuffer(buf, dtype=np.uint16, count=w * h).reshape((h, w))
+        return arr.copy()
 
     def save_image(self, filepath: str, fmt: TUIMG_FORMATS | None = None) -> None:
         """Save the most recent frame buffer content to disk."""
@@ -446,23 +614,45 @@ class CameraController:
         fs.pstrSavePath = filepath.encode("utf-8")
         fs.pFrame = pointer(self._frame)
         result = TUCAM_File_SaveImage(self._hcam, fs)
+        log.info("TUCAM_File_SaveImage(%s) returned %s", filepath, describe_tucam_ret(result))
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Save image failed: {result}")
+            raise RuntimeError(f"Save image failed: {describe_tucam_ret(result)}")
 
     # ------------------------------------------------------------------
     # Connection monitoring
     # ------------------------------------------------------------------
 
-    def is_connected(self) -> bool:
-        """Check if the physical device is still connected."""
+    def connection_status(self) -> bool | None:
+        """
+        Check if the physical device is still connected.
+
+        Returns ``None`` when the SDK/camera does not support querying this
+        status, which should be treated as "unknown", not disconnected.
+        """
         if not self._opened or self._hcam == 0:
             return False
         try:
             vi = TUCAM_VALUE_INFO(TUCAM_IDINFO.TUIDI_CONNECTSTATUS.value, 0, 0, 0)
-            TUCAM_Dev_GetInfo(self._hcam, pointer(vi))
-            return vi.nValue != 0
-        except Exception:
-            return False
+            result = TUCAM_Dev_GetInfo(self._hcam, pointer(vi))
+            if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+                log.info("Connection status query unsupported/failed: %s", describe_tucam_ret(result))
+                return None
+            log.debug("Connection status value=%s", vi.nValue)
+            if vi.nValue == 0:
+                log.info(
+                    "Connection status returned 0 while the device may still work; "
+                    "treating it as unknown to avoid false disconnect warnings"
+                )
+                return None
+            return True
+        except Exception as exc:
+            log.exception("Connection status query raised: %s", exc)
+            return None
+
+    def is_connected(self) -> bool:
+        """Check if the physical device is still connected."""
+        status = self.connection_status()
+        return True if status is None else status
 
     # ------------------------------------------------------------------
     # Helpers

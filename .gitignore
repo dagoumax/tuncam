@@ -6,6 +6,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+logs/*.log
+Dhyana*.xml
 
 # Local scratch notes generated during development.
 doc_content.txt

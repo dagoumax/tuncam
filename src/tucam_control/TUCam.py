@@ -14,14 +14,39 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _PACKAGE_DIR.parents[1]
 _DLL_DIR = _PROJECT_ROOT / "lib" / "x64"
 _DLL_PATH = _DLL_DIR / "TUCam.dll"
+_DLL_DEPENDENCY_NAMES = (
+    "clallserial.dll",
+    "mfc120u.dll",
+    "msvcp120.dll",
+    "msvcr120.dll",
+    "MultiCam.dll",
+    "phxlx64.dll",
+    "tuimgcv_core2410.dll",
+    "tuimgcv_highgui2410.dll",
+    "tuimgcv_imgproc2410.dll",
+)
+_DLL_DIRECTORY_HANDLE = None
 
 if not _DLL_PATH.exists():
     raise FileNotFoundError(f"TUCam.dll not found at {_DLL_PATH}")
 
 if hasattr(os, "add_dll_directory"):
-    os.add_dll_directory(str(_DLL_DIR))
+    _DLL_DIRECTORY_HANDLE = os.add_dll_directory(str(_DLL_DIR))
 
 TUSDKdll = OleDLL(str(_DLL_PATH))
+
+
+def sdk_diagnostics() -> dict[str, object]:
+    """Return SDK path and dependency diagnostics for persistent logging."""
+    dependencies = {name: (_DLL_DIR / name).exists() for name in _DLL_DEPENDENCY_NAMES}
+    return {
+        "project_root": str(_PROJECT_ROOT),
+        "dll_dir": str(_DLL_DIR),
+        "dll_path": str(_DLL_PATH),
+        "dll_exists": _DLL_PATH.exists(),
+        "dependencies": dependencies,
+        "missing_dependencies": [name for name, exists in dependencies.items() if not exists],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +117,59 @@ class TUCAMRET(Enum):
     TUCAMRET_OPTICS_UNPLUGGED = 0x83001003
     TUCAMRET_RECEIVE_FINISH = 0x00000002
     TUCAMRET_EXTERNAL_TRIGGER = 0x00000003
+
+
+class TUCAMRET_UNKNOWN:
+    """Fallback return-code object for SDK codes not listed in TUCAMRET."""
+
+    def __init__(self, value: int) -> None:
+        self.value = value & 0xFFFFFFFF
+        self.name = f"TUCAMRET_UNKNOWN_0x{self.value:08X}"
+
+    def __repr__(self) -> str:
+        return self.name
+
+    def __str__(self) -> str:
+        return self.name
+
+
+_TUCAMRET_HINTS = {
+    TUCAMRET.TUCAMRET_NOT_SUPPORT.value: (
+        "当前相机/驱动/SDK 组合不支持该操作；请确认安装的 TUCam SDK 与相机型号匹配。"
+    ),
+    TUCAMRET.TUCAMRET_NO_CAMERA.value: (
+        "未检测到相机；请检查电源、USB 连接和驱动安装。"
+    ),
+    TUCAMRET.TUCAMRET_NO_DRIVER.value: (
+        "未找到相机驱动；请重新安装或修复 TUCam/Dhyana 驱动。"
+    ),
+    TUCAMRET.TUCAMRET_BUSY.value: (
+        "相机正忙；请关闭其他相机软件后重新连接。"
+    ),
+    TUCAMRET.TUCAMRET_ACCESSDENY.value: (
+        "访问被拒绝；可能有其他进程正在占用相机。"
+    ),
+}
+
+
+def _as_tucam_ret(value: int) -> TUCAMRET | TUCAMRET_UNKNOWN:
+    """Convert signed ctypes return values to unsigned TUCam return codes."""
+    unsigned_value = int(value) & 0xFFFFFFFF
+    try:
+        return TUCAMRET(unsigned_value)
+    except ValueError:
+        return TUCAMRET_UNKNOWN(unsigned_value)
+
+
+def describe_tucam_ret(result: TUCAMRET | TUCAMRET_UNKNOWN) -> str:
+    """Format a TUCam return code with signed/unsigned values and a hint."""
+    value = result.value
+    signed_value = c_int32(value).value
+    text = f"{result.name} (0x{value:08X}, signed {signed_value})"
+    hint = _TUCAMRET_HINTS.get(value)
+    if hint:
+        text = f"{text}: {hint}"
+    return text
 
 
 class TUCAM_IDINFO(Enum):
@@ -443,79 +521,79 @@ class TUCAM_IMG_MATH(Structure):
 
 TUCAM_Api_Init = TUSDKdll.TUCAM_Api_Init
 TUCAM_Api_Init.argtypes = [POINTER(TUCAM_INIT), c_int32]
-TUCAM_Api_Init.restype = TUCAMRET
+TUCAM_Api_Init.restype = _as_tucam_ret
 
 TUCAM_Api_Uninit = TUSDKdll.TUCAM_Api_Uninit
-TUCAM_Api_Uninit.restype = TUCAMRET
+TUCAM_Api_Uninit.restype = _as_tucam_ret
 
 TUCAM_Dev_Open = TUSDKdll.TUCAM_Dev_Open
 TUCAM_Dev_Open.argtypes = [POINTER(TUCAM_OPEN)]
-TUCAM_Dev_Open.restype = TUCAMRET
+TUCAM_Dev_Open.restype = _as_tucam_ret
 
 TUCAM_Dev_Close = TUSDKdll.TUCAM_Dev_Close
 TUCAM_Dev_Close.argtypes = [c_void_p]
-TUCAM_Dev_Close.restype = TUCAMRET
+TUCAM_Dev_Close.restype = _as_tucam_ret
 
 TUCAM_Dev_GetInfo = TUSDKdll.TUCAM_Dev_GetInfo
 TUCAM_Dev_GetInfo.argtypes = [c_void_p, POINTER(TUCAM_VALUE_INFO)]
-TUCAM_Dev_GetInfo.restype = TUCAMRET
+TUCAM_Dev_GetInfo.restype = _as_tucam_ret
 
 TUCAM_Dev_GetInfoEx = TUSDKdll.TUCAM_Dev_GetInfoEx
 TUCAM_Dev_GetInfoEx.argtypes = [c_uint, POINTER(TUCAM_VALUE_INFO)]
-TUCAM_Dev_GetInfoEx.restype = TUCAMRET
+TUCAM_Dev_GetInfoEx.restype = _as_tucam_ret
 
 TUCAM_Capa_GetAttr = TUSDKdll.TUCAM_Capa_GetAttr
 TUCAM_Capa_GetAttr.argtypes = [c_void_p, POINTER(TUCAM_CAPA_ATTR)]
-TUCAM_Capa_GetAttr.restype = TUCAMRET
+TUCAM_Capa_GetAttr.restype = _as_tucam_ret
 
 TUCAM_Capa_GetValue = TUSDKdll.TUCAM_Capa_GetValue
 TUCAM_Capa_GetValue.argtypes = [c_void_p, c_int32, c_void_p]
-TUCAM_Capa_GetValue.restype = TUCAMRET
+TUCAM_Capa_GetValue.restype = _as_tucam_ret
 
 TUCAM_Capa_SetValue = TUSDKdll.TUCAM_Capa_SetValue
 TUCAM_Capa_SetValue.argtypes = [c_void_p, c_int32, c_int32]
-TUCAM_Capa_SetValue.restype = TUCAMRET
+TUCAM_Capa_SetValue.restype = _as_tucam_ret
 
 TUCAM_Prop_GetAttr = TUSDKdll.TUCAM_Prop_GetAttr
 TUCAM_Prop_GetAttr.argtypes = [c_void_p, POINTER(TUCAM_PROP_ATTR)]
-TUCAM_Prop_GetAttr.restype = TUCAMRET
+TUCAM_Prop_GetAttr.restype = _as_tucam_ret
 
 TUCAM_Prop_GetValue = TUSDKdll.TUCAM_Prop_GetValue
 TUCAM_Prop_GetValue.argtypes = [c_void_p, c_int32, c_void_p, c_int32]
-TUCAM_Prop_GetValue.restype = TUCAMRET
+TUCAM_Prop_GetValue.restype = _as_tucam_ret
 
 TUCAM_Prop_SetValue = TUSDKdll.TUCAM_Prop_SetValue
 TUCAM_Prop_SetValue.argtypes = [c_void_p, c_int32, c_double, c_int32]
-TUCAM_Prop_SetValue.restype = TUCAMRET
+TUCAM_Prop_SetValue.restype = _as_tucam_ret
 
 TUCAM_Buf_Alloc = TUSDKdll.TUCAM_Buf_Alloc
 TUCAM_Buf_Alloc.argtypes = [c_void_p, POINTER(TUCAM_FRAME)]
-TUCAM_Buf_Alloc.restype = TUCAMRET
+TUCAM_Buf_Alloc.restype = _as_tucam_ret
 
 TUCAM_Buf_Release = TUSDKdll.TUCAM_Buf_Release
 TUCAM_Buf_Release.argtypes = [c_void_p]
-TUCAM_Buf_Release.restype = TUCAMRET
+TUCAM_Buf_Release.restype = _as_tucam_ret
 
 TUCAM_Buf_AbortWait = TUSDKdll.TUCAM_Buf_AbortWait
 TUCAM_Buf_AbortWait.argtypes = [c_void_p]
-TUCAM_Buf_AbortWait.restype = TUCAMRET
+TUCAM_Buf_AbortWait.restype = _as_tucam_ret
 
 TUCAM_Buf_WaitForFrame = TUSDKdll.TUCAM_Buf_WaitForFrame
 TUCAM_Buf_WaitForFrame.argtypes = [c_void_p, POINTER(TUCAM_FRAME), c_int32]
-TUCAM_Buf_WaitForFrame.restype = TUCAMRET
+TUCAM_Buf_WaitForFrame.restype = _as_tucam_ret
 
 TUCAM_Cap_Start = TUSDKdll.TUCAM_Cap_Start
 TUCAM_Cap_Start.argtypes = [c_void_p, c_uint]
-TUCAM_Cap_Start.restype = TUCAMRET
+TUCAM_Cap_Start.restype = _as_tucam_ret
 
 TUCAM_Cap_Stop = TUSDKdll.TUCAM_Cap_Stop
 TUCAM_Cap_Stop.argtypes = [c_void_p]
-TUCAM_Cap_Stop.restype = TUCAMRET
+TUCAM_Cap_Stop.restype = _as_tucam_ret
 
 TUCAM_File_SaveImage = TUSDKdll.TUCAM_File_SaveImage
 TUCAM_File_SaveImage.argtypes = [c_void_p, TUCAM_FILE_SAVE]
-TUCAM_File_SaveImage.restype = TUCAMRET
+TUCAM_File_SaveImage.restype = _as_tucam_ret
 
 TUCAM_Reg_Read = TUSDKdll.TUCAM_Reg_Read
 TUCAM_Reg_Read.argtypes = [c_void_p, TUCAM_REG_RW]
-TUCAM_Reg_Read.restype = TUCAMRET
+TUCAM_Reg_Read.restype = _as_tucam_ret

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import ctypes
 
 
 # ── Redirect C-level stderr (fd 2) to suppress libpng iCCP warnings ──
@@ -43,17 +44,70 @@ def _start_stderr_filter() -> None:
 _start_stderr_filter()
 
 
+from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from tucam_control.debug_log import get_app_logger, setup_app_logging
+from tucam_control.resources import app_icon_path
 from tucam_control.ui.main_window import MainWindow
 
 
+def _set_windows_app_id() -> None:
+    """Help Windows use the application icon on the taskbar."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "TucamControl.Dhyana95V2"
+        )
+    except Exception:
+        pass
+
+
+def _install_qt_message_handler() -> None:
+    """Route Qt diagnostic messages into the application log."""
+    log = get_app_logger("qt")
+
+    def _handler(msg_type, context, message: str) -> None:
+        location = ""
+        if context and context.file:
+            location = f" ({context.file}:{context.line})"
+        text = f"{message}{location}"
+        if msg_type == QtMsgType.QtDebugMsg:
+            log.debug(text)
+        elif msg_type == QtMsgType.QtInfoMsg:
+            log.info(text)
+        elif msg_type == QtMsgType.QtWarningMsg:
+            log.warning(text)
+        elif msg_type == QtMsgType.QtCriticalMsg:
+            log.error(text)
+        elif msg_type == QtMsgType.QtFatalMsg:
+            log.critical(text)
+        else:
+            log.info(text)
+
+    qInstallMessageHandler(_handler)
+
+
 def main() -> None:
+    log_path = setup_app_logging()
+    log = get_app_logger("main")
+    log.info("Application starting; log: %s", log_path)
+    _set_windows_app_id()
     app = QApplication(sys.argv)
+    _install_qt_message_handler()
     app.setApplicationName("Dhyana-95-V2 Camera Control")
     app.setOrganizationName("TucamControl")
 
+    icon_path = app_icon_path()
+    app_icon = QIcon(str(icon_path)) if icon_path is not None else QIcon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+
     window = MainWindow()
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     window.show()
 
     # Ensure camera is released on any exit

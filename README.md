@@ -1,146 +1,240 @@
 # Dhyana-95-V2 Camera Control
 
-基于 TUCam SDK 的 **Dhyana-95-V2** 科学相机采集、拉曼光谱处理与气体浓度分析软件。
+这是一个基于 TUCam SDK 的 Dhyana-95-V2 科学相机采集、Raman 光谱处理和气体浓度分析程序。程序支持真实相机采集，也支持加载 TIF 图片进行离线测试。
 
-## 功能概要
+## 主要功能
 
-### 数据采集
+### 相机采集
 
-| 功能 | 说明 |
-|------|------|
-| 曝光时间 | 默认 `1000 ms`，单位 ms，范围受相机硬件限制 |
-| 温度控制 | TEC 制冷目标温度，默认 `-10 °C`，连接后自动尝试开启 TEC |
-| 风扇控制 | 1-4 档可调，不允许关闭，默认 2 档 |
-| 工作模式 | 支持 HDR / High Gain / Low Gain |
-| 设备信息 | 显示型号、序列号、固件版本、传感器尺寸、通道数等 |
-| 实时遥测 | 每秒刷新 FPGA / PCBA / 环境温度、风扇转速等 |
-| 单帧采集 | 抓取一帧并显示 |
-| 连续采集 | 短等待轮询相机帧，避免 1s 曝光时阻塞 UI 主线程 |
-| 保存图片 | 支持 TIFF / PNG / JPEG；默认保存目录为 `~/Documents/tucam_data` |
+- 自动初始化 TUCam SDK 并连接 Dhyana 相机
+- 支持单帧采集和连续采集
+- 支持曝光时间设置，默认 `1000 ms`
+- 支持温度目标、风扇档位、工作模式设置
+- 自动记录 SDK 返回码、相机数量、设备句柄、帧格式和图像统计值
+- 支持自动保存采集图像
+- 支持加载单张 TIF 图片进行测试
+- 支持批量加载 TIF 文件夹，模拟连续采集流程
 
 ### 数据处理
 
-| 功能 | 说明 |
-|------|------|
-| 行分组 | 支持多组行范围，例如 `1-40, 91-130`；也支持空格、换行、中文逗号和顿号分隔 |
-| 最大行组数 | 目标场景支持一次处理最多 16 个行组 |
-| 列合并 | 按因子 `n` 将相邻列求平均；`n=1` 表示不合并 |
-| arPLS 基线校正 | 非对称重加权惩罚最小二乘基线估计，参数可调 |
-| 输出模式 | 原始数据 / 校正后数据 / 仅基线 |
-| 后台处理 | 每帧的数据处理和浓度计算在后台线程执行，避免界面卡顿 |
-| 防堆积策略 | 后台任务忙时只保留最新帧，丢弃过期待处理帧，防止任务队列越堆越长 |
+- 支持行组设置，例如 `1-40, 91-130, 200-250`
+- 支持一次处理最多 16 个行组的使用场景
+- 支持列合并，降低噪声或数据量
+- 支持 arPLS 基线校正
+- 支持原始数据、校正后数据、仅基线等输出模式
+- 采集后的数据处理在后台线程执行，避免界面卡死
+- 后台任务忙时只保留最新待处理帧，避免任务队列无限堆积
 
-### 气体浓度分析
+### 浓度分析
 
-| 功能 | 说明 |
-|------|------|
-| 峰位检测 | 在预设峰位 ± 搜索窗口内定位最高点 |
-| 浓度计算 | 净峰高 × 气体系数，再按总分量归一化 |
-| 气体配置 | 可增删气体，独立设置峰位、搜索窗口、系数和 Raman 位移 |
-| 未检出判断 | 净峰高低于噪声阈值时自动标记未检出 |
-| 实时浓度表 | 显示当前帧各气体峰高与浓度百分比 |
-| 趋势图 | 支持全部叠加、单独气体、全部行组对比 |
-| CSV 导出 | 导出浓度历史，使用 `utf-8-sig`，便于 Excel 打开 |
+- 支持多气体配置
+- 支持峰位、搜索窗口、浓度系数和 Raman 位移配置
+- 支持按行组计算气体浓度
+- 支持浓度历史趋势显示
+- 支持 CSV 导出
 
-### 离线与辅助功能
-
-| 功能 | 说明 |
-|------|------|
-| TIF 载入 | 单张 TIF 加载，用于离线验证处理流程 |
-| 批量测试 | 选择文件夹后按序播放 TIF，模拟连续采集 |
-| Raman 校准 | 自动寻峰 + 手动标注 Raman 位移 + 多项式拟合 |
-| 图像光标 | 左键定位像素，方向键移动，右键取消 |
-| 光谱光标 | 读取 Raman 位移和强度 |
-| 断开检测 | 轮询连接状态，意外断开时自动停止采集并提示 |
-| 参数校验 | 行分组、曝光/温度范围、气体配置等均有校验 |
-
-## 1 秒曝光与 16 行组处理能力
-
-当前连续采集采用短等待轮询，相机曝光时间可设置为 `1000 ms`。采到一帧后，图像显示会立即更新，行分组、arPLS 和浓度计算在后台线程完成。
-
-设计目标不是严格的 `1.000 s` 定时采样，而是满足：
-
-- 单帧曝光时间达到约 `1 s`
-- 采集界面不因 16 个行组计算而卡死
-- 后台计算来不及时不堆积历史任务，只处理最新帧
-
-在本机模拟 `2048 x 2048` 图像、16 个行组、开启 arPLS 的核心处理测试中，处理 + 浓度分析约为 `300 ms` 量级。实际速度仍会受相机读出、USB 传输、自动保存、绘图刷新和电脑性能影响。
-
-建议实时采集时：
-
-- 曝光时间设为 `1000 ms`
-- 行组数量不超过 16
-- 如需最稳的界面响应，关闭自动保存或降低保存频率
-- 若光谱图显示全部 16 组且历史点很多，优先查看单组或单气体趋势
-
-## 环境要求
+## 运行环境
 
 - Windows 10/11 64-bit
 - Python 3.10+
 - TUCam SDK / Dhyana 相机驱动
-- 离线 TIF 测试模式无需连接相机
+- 项目内需要包含 `lib/x64/TUCam.dll` 及其依赖 DLL
 
-## 安装与运行
+离线 TIF 测试模式不需要连接相机。
 
-```bash
-# 1. 安装 uv
-pip install uv
+## 安装与启动
 
-# 2. 进入项目目录
-cd tucam
+推荐使用项目内已有的虚拟环境或 `uv` 安装依赖。
 
-# 3. 安装依赖
+```powershell
+cd C:\Users\Lenovo\Desktop\tucam
 uv sync
-
-# 4. 运行
 uv run tucam-control
 ```
 
-依赖由 `pyproject.toml` 声明，`uv.lock` 用于锁定可复现环境。主要依赖包括：
+也可以使用项目根目录下的快捷启动脚本：
 
-- PySide6
-- numpy
-- scipy
-- matplotlib
-- pillow
-- python-docx
+```powershell
+.\start_tucam.bat
+```
+
+程序入口定义在 `pyproject.toml`：
+
+```toml
+[project.scripts]
+tucam-control = "tucam_control.main:main"
+```
+
+## 日志与排错
+
+程序会常驻写入日志，便于长期排查相机、SDK、采集帧和界面问题。
+
+日志位置：
+
+- 主日志：`logs/tucam_control.log`
+- 崩溃日志：`logs/tucam_fault.log`
+- 旧版调试日志兼容路径会转向主日志
+
+日志采用轮转策略：
+
+- 单个主日志最大约 5 MB
+- 最多保留 5 份历史日志
+
+排查相机问题时，优先搜索这些关键词：
+
+- `SDK diagnostics`
+- `TUCAM_Api_Init`
+- `TUCAM_Dev_Open`
+- `Data format readback`
+- `Bit depth readback`
+- `TUCAM_Cap_Start`
+- `Frame received`
+- `Frame array stats`
+- `Fan gear readback`
+- `Unhandled exception`
+
+### 常见判断
+
+如果日志中出现：
+
+```text
+TUCAM_Api_Init returned TUCAMRET_SUCCESS
+TUCAM_Dev_Open returned TUCAMRET_SUCCESS
+```
+
+说明 SDK 初始化和相机打开成功。
+
+如果日志中出现：
+
+```text
+Frame array stats: min=0 max=0 mean=0
+```
+
+说明程序拿到的图像数组确实全为 0，需要继续检查曝光、光路、触发、快门、增益或相机输出格式。
+
+如果日志中出现：
+
+```text
+Frame array stats: min=0 max=5 mean=0.5
+```
+
+说明不是完全无数据，而是信号非常低，画面肉眼看起来可能仍然接近纯黑。
+
+如果日志中出现：
+
+```text
+format=18 channels=3 elem_bytes=1
+```
+
+说明当前帧可能是 `RGB888` 预览格式。程序会优先尝试切换到 RAW 或更高位深格式，并记录 `Data format readback` 和 `Bit depth readback`。
+
+## SDK 文件
+
+SDK 文件位于：
+
+```text
+lib/x64/
+```
+
+当前程序会在启动时检查并记录这些 DLL 是否存在：
+
+- `TUCam.dll`
+- `clallserial.dll`
+- `mfc120u.dll`
+- `msvcp120.dll`
+- `msvcr120.dll`
+- `MultiCam.dll`
+- `phxlx64.dll`
+- `tuimgcv_core2410.dll`
+- `tuimgcv_highgui2410.dll`
+- `tuimgcv_imgproc2410.dll`
+
+如果移植到其它电脑，优先确认 `lib/x64` 文件完整，并确认 Python、系统和 DLL 都是 64 位。
+
+## 风扇与制冷说明
+
+程序会尝试设置风扇档位，并记录能力范围和读回值：
+
+```text
+Fan gear attr returned ...
+Set fan gear ...
+Fan gear readback after set ...
+```
+
+部分相机或 SDK 组合不支持读取风扇转速，日志中可能出现：
+
+```text
+TUIDI_FAN_SPEED returned TUCAMRET_NOT_SUPPORT
+```
+
+这表示程序无法读取真实转速，不一定表示风扇档位设置失败。
+
+部分相机或 SDK 组合也可能不支持显式开启 TEC：
+
+```text
+TUCAM_Capa_SetValue(ENABLETEC=1) returned TUCAMRET_NOT_SUPPORT
+```
+
+这种情况下，程序仍会尝试设置目标温度，并把 SDK 返回码写入日志。
 
 ## 项目结构
 
 ```text
 tucam/
-├── pyproject.toml
-├── uv.lock
-├── README.md
-├── .python-version
-├── lib/
-│   └── x64/                  # TUCam SDK DLL
-└── src/
-    └── tucam_control/
-        ├── main.py            # 应用入口
-        ├── TUCam.py           # SDK ctypes 封装与 DLL 加载
-        ├── camera.py          # 相机控制器
-        ├── data_processor.py  # 行分组、列合并、arPLS
-        ├── gas_analyzer.py    # 峰位检测与浓度计算
-        └── ui/
-            ├── main_window.py       # 主窗口、采集调度、后台处理
-            ├── acquisition_tab.py   # 图像预览、采集控制、批量 TIF
-            ├── settings_tab.py      # 参数设置与气体配置
-            ├── data_tab.py          # 光谱图与 Raman 光标
-            └── concentration_tab.py # 浓度表、趋势图与 CSV 导出
+├─ assets/                  # 图标资源
+├─ lib/x64/                 # TUCam SDK DLL
+├─ logs/                    # 运行日志，已被 .gitignore 忽略
+├─ scripts/                 # 辅助脚本
+├─ src/tucam_control/
+│  ├─ main.py               # 程序入口
+│  ├─ TUCam.py              # TUCam SDK ctypes 封装
+│  ├─ camera.py             # 相机控制与采集
+│  ├─ debug_log.py          # 常驻日志
+│  ├─ resources.py          # 资源路径
+│  ├─ data_processor.py     # 行组、列合并、基线校正
+│  ├─ gas_analyzer.py       # 气体浓度分析
+│  ├─ calibration.py        # Raman 校准
+│  └─ ui/                   # PySide6 界面
+├─ start_tucam.bat          # 快捷启动脚本
+├─ pyproject.toml
+├─ uv.lock
+└─ README.md
 ```
 
-## 扩展指南
+## 采集性能说明
 
-- 新增相机功能：修改 `camera.py` 的 `CameraController`
-- 新增 SDK 调用：在 `TUCam.py` 添加 ctypes 结构体和函数绑定
-- 新增处理算法：修改 `data_processor.py` 或新增处理模块
-- 新增气体类型：在设置页气体配置表中添加，或修改 `GasAnalyzer.default_gases()`
-- 新增 UI 页面：在 `ui/` 下创建组件，并在 `main_window.py` 注册标签页
+当前目标场景是：
 
-## 注意事项
+- 曝光时间约 `1 s`
+- 一次最多处理 16 个行组
+- 界面不因浓度计算而堵塞
 
-- `lib/x64` 中的 DLL 必须与 Python/系统架构一致。
-- `TUCam.py` 会把 `lib/x64` 加入 DLL 搜索目录，以便加载 TUCam 及其依赖 DLL。
-- 自动保存会增加磁盘 I/O，实时采集中可能带来帧间隔抖动。
-- 后台处理只保证界面不堵塞；如果相机读出或保存本身很慢，实际帧率仍会下降。
+连续采集时，程序使用短轮询等待相机帧。采到一帧后立即更新图像，并把数据处理放到后台线程。后台处理来不及时，会丢弃旧的待处理帧，只保留最新帧，避免进程越跑越堵。
+
+实际帧间隔仍会受这些因素影响：
+
+- 相机曝光时间
+- USB 传输速度
+- 图像保存 I/O
+- Raman 图和浓度趋势刷新
+- 电脑性能
+
+## 开发建议
+
+- 修改 SDK 调用时优先改 `TUCam.py`
+- 修改相机流程时优先改 `camera.py`
+- 修改界面交互时优先改 `ui/main_window.py`
+- 新增问题排查点时优先写入 `tucam_control` 日志
+- 不要提交 `logs/`、`.venv/`、`.idea/`、相机自动生成的 `Dhyana*.xml`
+
+## Git 忽略说明
+
+当前应忽略：
+
+- `.venv/`
+- `.idea/`
+- `__pycache__/`
+- `logs/`
+- `Dhyana*.xml`
+
+`uv.lock` 应保留在版本库中，便于复现依赖环境。

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..camera import CameraController
 from ..data_processor import DataProcessor
+from ..debug_log import get_debug_logger
 from ..gas_analyzer import GasAnalyzer
 from .acquisition_tab import AcquisitionTab
 from .settings_tab import SettingsTab
@@ -30,6 +31,7 @@ from .concentration_tab import ConcentrationTab
 
 DEFAULT_SAVE_DIR = str(Path.home() / "Documents" / "tucam_data")
 CAPTURE_POLL_TIMEOUT_MS = 50
+log = get_debug_logger("ui.main_window")
 
 
 class _ProcessingSignals(QObject):
@@ -59,6 +61,13 @@ class _ProcessingTask(QRunnable):
         try:
             started = time.perf_counter()
             row_groups = DataProcessor.parse_groups(self._settings.get("row_groups_text", ""))
+            log.debug(
+                "Processing task started: frame_shape=%s groups=%s merge_factor=%s batch=%s",
+                self._frame.shape,
+                row_groups,
+                self._settings.get("merge_factor", 1),
+                self._batch_mode,
+            )
 
             processor = DataProcessor()
             processor.row_groups = row_groups
@@ -92,6 +101,7 @@ class _ProcessingTask(QRunnable):
                 "mode": "index" if self._batch_mode else "time",
             })
         except Exception as exc:
+            log.exception("Processing task failed")
             self.signals.failed.emit(str(exc))
 
 
@@ -196,8 +206,11 @@ class MainWindow(QMainWindow):
 
     def _try_connect(self) -> None:
         try:
+            log.info("Trying to connect camera")
             count = self._camera.initialize()
+            log.info("Camera initialize finished; count=%s", count)
             if count == 0:
+                log.warning("No camera detected after TUCAM_Api_Init")
                 self.status_changed.emit("未检测到相机 / No camera detected")
                 QMessageBox.warning(
                     self,
@@ -217,10 +230,23 @@ class MainWindow(QMainWindow):
             self._acq_tab.show_device_info(info)
             self._settings_tab.update_ranges(self._camera)
             self._settings_tab.update_device_status(info)
-            self.status_changed.emit(f"已连接 / Connected: {info.model}")
+            status = self._camera.connection_status()
+            log.info(
+                "Camera connected: model=%r serial=%r connection_status=%s",
+                info.model,
+                info.serial_number,
+                status,
+            )
+            if status is None:
+                self.status_changed.emit(
+                    f"已连接 / Connected: {info.model} (SDK 不支持断开状态检测)"
+                )
+            else:
+                self.status_changed.emit(f"已连接 / Connected: {info.model}")
             self._was_connected = True
             self._disconnect_warned = False
         except Exception as exc:
+            log.exception("Camera connection failed")
             self.status_changed.emit(f"连接失败 / Connection failed: {exc}")
             QMessageBox.critical(
                 self,
@@ -235,40 +261,45 @@ class MainWindow(QMainWindow):
     def _apply_current_settings(self) -> None:
         s = self._settings
         try:
+            self._camera.configure_scientific_frame_format()
+        except Exception as exc:
+            log.warning("Failed to configure scientific frame format: %s", exc)
+        try:
             self._camera.set_exposure_time(s["exposure_time_ms"])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to apply exposure_time_ms=%s: %s", s.get("exposure_time_ms"), exc)
         try:
             self._camera.set_temperature_target(s["temperature_c"])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to apply temperature_c=%s: %s", s.get("temperature_c"), exc)
         try:
             self._camera.set_fan_gear(s["fan_gear"])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to apply fan_gear=%s: %s", s.get("fan_gear"), exc)
         try:
             self._camera.set_working_mode(s.get("working_mode", 0))
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to apply working_mode=%s: %s", s.get("working_mode", 0), exc)
 
     @Slot()
     def _on_reconnect(self) -> None:
+        log.info("Reconnect requested")
         self._capture_timer.stop()
         if self._camera.is_capturing:
             try:
                 self._camera.stop_capture()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("Failed to stop capture before reconnect: %s", exc)
             self._acq_tab.set_capturing_state(False)
 
         try:
             self._camera.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to close camera before reconnect: %s", exc)
         try:
             self._camera.uninitialize()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to uninitialize camera before reconnect: %s", exc)
 
         self._disconnect_warned = False
         self._try_connect()
@@ -391,6 +422,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_start_single(self) -> None:
         if not self._camera.is_open:
+            log.warning("Single capture requested while camera is not open")
             QMessageBox.warning(
                 self,
                 "相机未连接 / Camera Not Connected",
@@ -398,18 +430,22 @@ class MainWindow(QMainWindow):
             )
             return
         try:
+            log.info("Single capture requested")
             arr = self._camera.capture_single()
             if arr is not None:
+                log.info("Single frame captured: shape=%s dtype=%s", arr.shape, arr.dtype)
                 self._acq_tab.display_frame(arr)
                 self._auto_save_frame()
                 self.status_changed.emit("单帧采集完成 / Single frame captured")
             else:
+                log.warning("Single capture timed out")
                 QMessageBox.warning(
                     self,
                     "采集超时 / Capture Timeout",
                     "等待图像帧超时，请检查相机连接。",
                 )
         except Exception as exc:
+            log.exception("Single capture failed")
             QMessageBox.critical(
                 self,
                 "采集错误 / Capture Error",
@@ -419,6 +455,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_start_continuous(self) -> None:
         if not self._camera.is_open:
+            log.warning("Continuous capture requested while camera is not open")
             QMessageBox.warning(
                 self,
                 "相机未连接 / Camera Not Connected",
@@ -426,11 +463,14 @@ class MainWindow(QMainWindow):
             )
             return
         try:
+            log.info("Continuous capture requested")
             self._camera.start_capture()
             self._acq_tab.set_capturing_state(True)
             self._capture_timer.start()
+            log.info("Continuous capture timer started interval_ms=%s", self._capture_timer.interval())
             self.status_changed.emit("连续采集中 / Continuous capture running")
         except Exception as exc:
+            log.exception("Continuous capture start failed")
             QMessageBox.critical(
                 self,
                 "启动采集失败 / Capture Start Failed",
@@ -439,11 +479,12 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_stop(self) -> None:
+        log.info("Capture stop requested")
         self._capture_timer.stop()
         try:
             self._camera.stop_capture()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to stop capture: %s", exc)
         self._acq_tab.set_capturing_state(False)
         self.status_changed.emit("采集已停止 / Capture stopped")
 
@@ -482,11 +523,16 @@ class MainWindow(QMainWindow):
             return
         arr = self._camera.wait_for_frame(timeout_ms=CAPTURE_POLL_TIMEOUT_MS)
         if arr is not None:
+            log.debug("Continuous frame received: shape=%s dtype=%s", arr.shape, arr.dtype)
             self._acq_tab.display_frame(arr)
             self._auto_save_frame()
         else:
-            if not self._camera.is_connected():
+            status = self._camera.connection_status()
+            if status is False:
+                log.warning("Capture poll detected disconnected device")
                 self._on_device_lost()
+            elif status is None:
+                log.debug("Capture poll got no frame; connection status unknown")
 
     @Slot()
     def _on_refresh_info(self) -> None:
@@ -496,15 +542,18 @@ class MainWindow(QMainWindow):
             info = self._camera.get_device_info()
             self._acq_tab.update_telemetry(info)
             self._settings_tab.update_device_status(info)
-        except Exception:
-            if self._was_connected and not self._disconnect_warned:
-                self._on_device_lost()
+        except Exception as exc:
+            log.warning("Telemetry refresh failed: %s", exc)
+            self.status_changed.emit(f"设备信息刷新失败 / Telemetry unavailable: {exc}")
 
-        if self._was_connected and not self._camera.is_connected():
+        status = self._camera.connection_status()
+        if self._was_connected and status is False:
             if not self._disconnect_warned:
+                log.warning("Refresh timer detected disconnected device")
                 self._on_device_lost()
 
     def _on_device_lost(self) -> None:
+        log.warning("Device lost handler triggered")
         self._disconnect_warned = True
         self._was_connected = False
         self._capture_timer.stop()
@@ -512,8 +561,8 @@ class MainWindow(QMainWindow):
         self._settings_tab.update_device_status(None)
         try:
             self._camera.stop_capture()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to stop capture after device lost: %s", exc)
         self.status_changed.emit("设备已断开！/ Device disconnected!")
         QMessageBox.warning(
             self,
@@ -645,6 +694,7 @@ class MainWindow(QMainWindow):
     def _on_processing_failed(self, message: str) -> None:
         self._processing_busy = False
         self._processing_task = None
+        log.warning("Processing failed: %s", message)
         QMessageBox.warning(
             self,
             "处理错误 / Processing Error",
@@ -713,6 +763,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        log.info("Application window closing")
         self._refresh_timer.stop()
         self._capture_timer.stop()
         self._batch_timer.stop()
@@ -720,6 +771,6 @@ class MainWindow(QMainWindow):
         self._processing_pool.waitForDone(1000)
         try:
             self._camera.uninitialize()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to uninitialize camera on close: %s", exc)
         super().closeEvent(event)
