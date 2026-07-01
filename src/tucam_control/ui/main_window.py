@@ -161,7 +161,7 @@ class MainWindow(QMainWindow):
         self._batch_timer.setInterval(200)
         self._batch_timer.timeout.connect(self._on_batch_tick)
 
-        self._try_connect()
+        QTimer.singleShot(0, self._try_connect)
 
     # ------------------------------------------------------------------
     # UI construction
