@@ -339,11 +339,13 @@ class MainWindow(QMainWindow):
     def _on_batch_load(self, folder: str) -> None:
         import glob
         folder_path = Path(folder)
+        log.info("Batch load requested: folder=%s", folder)
         tif_files = sorted(
             glob.glob(str(folder_path / "*.tif"))
             + glob.glob(str(folder_path / "*.tiff"))
         )
         if not tif_files:
+            log.warning("Batch load found no TIF files: folder=%s", folder)
             QMessageBox.warning(
                 self,
                 "无 TIF 文件 / No TIF Files",
@@ -358,10 +360,14 @@ class MainWindow(QMainWindow):
                 arr = np.array(img, dtype=np.uint16)
                 if arr.ndim == 2:
                     self._batch_images.append((f, arr))
+                else:
+                    log.warning("Batch skipped non-grayscale image: path=%s ndim=%s", f, arr.ndim)
             except Exception as exc:
+                log.warning("Batch skipped unreadable image: path=%s error=%s", f, exc)
                 self.status_changed.emit(f"跳过 {Path(f).name}: {exc}")
 
         if not self._batch_images:
+            log.warning("Batch load failed: no usable images in folder=%s", folder)
             QMessageBox.warning(self, "加载失败", "没有成功加载任何图像。")
             return
 
@@ -369,15 +375,31 @@ class MainWindow(QMainWindow):
         self._conc_tab.clear_history()
         self._acq_tab.set_batch_state(True)
         self._batch_timer.start()
+        log.info(
+            "Batch test started: usable_images=%s total_tif_files=%s folder=%s",
+            len(self._batch_images),
+            len(tif_files),
+            folder,
+        )
         self.status_changed.emit(f"批量测试: {len(self._batch_images)} 张图像")
 
     @Slot()
     def _on_batch_tick(self) -> None:
+        if self._processing_busy:
+            return
         if self._batch_idx >= len(self._batch_images):
             self._on_batch_stop()
             return
         path, arr = self._batch_images[self._batch_idx]
         self._batch_idx += 1
+        log.info(
+            "Batch frame queued: index=%s total=%s path=%s shape=%s dtype=%s",
+            self._batch_idx,
+            len(self._batch_images),
+            path,
+            arr.shape,
+            arr.dtype,
+        )
         self._acq_tab.display_frame(arr)
         self.status_changed.emit(f"Batch [{self._batch_idx}/{len(self._batch_images)}] {Path(path).name}")
 
@@ -385,6 +407,11 @@ class MainWindow(QMainWindow):
     def _on_batch_stop(self) -> None:
         self._batch_timer.stop()
         self._acq_tab.set_batch_state(False)
+        log.info(
+            "Batch test stopped: processed_or_queued=%s total=%s",
+            self._batch_idx,
+            len(self._batch_images),
+        )
         self.status_changed.emit(f"批量测试结束 / Batch finished ({len(self._batch_images)} images)")
 
     # ------------------------------------------------------------------
@@ -685,6 +712,13 @@ class MainWindow(QMainWindow):
                     payload["labels"],
                     mode=payload["mode"],
                 )
+            log.info(
+                "Processing finished: duration_ms=%.1f result_shape=%s labels=%s mode=%s",
+                payload["duration_ms"],
+                payload["result"].shape,
+                payload["labels"],
+                payload["mode"],
+            )
             self.status_changed.emit(
                 f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
             )
