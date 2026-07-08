@@ -541,9 +541,8 @@ class ConcentrationTab(QWidget):
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            value_label = "平滑% / Smoothed %" if self._export_smoothed else "原始% / Raw %"
             for _, _, h in columns:
-                header.append(f"{h} {value_label}")
+                header.append(h)
             writer.writerow(header)
 
             prepared = []
@@ -578,9 +577,8 @@ class ConcentrationTab(QWidget):
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            value_label = "平滑% / Smoothed %" if self._export_smoothed else "原始% / Raw %"
             for name in gas_names:
-                header.append(f"{name} {value_label}")
+                header.append(name)
             writer.writerow(header)
 
             prepared = []
