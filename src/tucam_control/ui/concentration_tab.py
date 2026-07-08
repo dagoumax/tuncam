@@ -42,6 +42,7 @@ class ConcentrationTab(QWidget):
         self._new_data: bool = False
         self._last_export_dir: str = ""
         self._display_y_range: tuple[float, float] | None = None
+        self._export_smoothed: bool = True
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setInterval(500)
@@ -147,6 +148,9 @@ class ConcentrationTab(QWidget):
         if current and self._group_combo.findData(current) >= 0:
             self._group_combo.setCurrentIndex(self._group_combo.findData(current))
         self._group_combo.blockSignals(False)
+
+    def set_export_smoothed(self, enabled: bool) -> None:
+        self._export_smoothed = enabled
 
     def add_data_point(
         self,
@@ -496,26 +500,28 @@ class ConcentrationTab(QWidget):
             if not is_all_groups:
                 group_data = self._selected_group_data()
                 raw_group_data = self._raw_history.get(glabel, {})
-                self._write_csv(path, group_data, raw_group_data, gas_names, export_range)
+                export_data = group_data if self._export_smoothed else raw_group_data
+                self._write_csv(path, export_data, gas_names, export_range)
             else:
                 if not self._group_labels or not self._history:
                     QMessageBox.information(self, "导出", "没有数据。")
                     return
-                self._write_csv_all_groups(path, gas_names, export_range)
+                export_history = self._history if self._export_smoothed else self._raw_history
+                self._write_csv_all_groups(path, export_history, gas_names, export_range)
 
             QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
 
-    def _write_csv_all_groups(self, path: str, gas_names: list[str],
+    def _write_csv_all_groups(self, path: str, history: dict, gas_names: list[str],
                               export_range: object) -> None:
-        """Export all groups: columns include smoothed and raw concentrations."""
+        """Export all groups using either smoothed or raw concentration history."""
         from datetime import datetime as dt_type
         is_datetime = False
         for lbl in self._group_labels:
-            if lbl not in self._history:
+            if lbl not in history:
                 continue
-            for _, (_, times) in self._history[lbl].items():
+            for _, (_, times) in history[lbl].items():
                 if len(times) > 0:
                     is_datetime = isinstance(times[0], dt_type)
                     break
@@ -523,37 +529,33 @@ class ConcentrationTab(QWidget):
         columns: list[tuple[str, str, str]] = []  # (gas_name, group_label, header)
         for gas in gas_names:
             for lbl in self._group_labels:
-                if lbl in self._history and gas in self._history[lbl]:
+                if lbl in history and gas in history[lbl]:
                     columns.append((gas, lbl, f"{gas}({lbl})"))
 
         max_len = 0
         for gas, lbl, _ in columns:
-            vals, times = self._history[lbl][gas]
+            vals, times = history[lbl][gas]
             filtered = self._filtered_pairs(vals, times, export_range)
             max_len = max(max_len, len(filtered[0]))
 
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
+            value_label = "平滑% / Smoothed %" if self._export_smoothed else "原始% / Raw %"
             for _, _, h in columns:
-                header.extend([f"{h} 平滑% / Smoothed %", f"{h} 原始% / Raw %"])
+                header.append(f"{h} {value_label}")
             writer.writerow(header)
 
             prepared = []
             for gas, lbl, _ in columns:
-                vals, times = self._history[lbl][gas]
-                smooth_vals, smooth_times = self._filtered_pairs(vals, times, export_range)
-                raw_vals, raw_times = self._filtered_pairs(
-                    *self._raw_history.get(lbl, {}).get(gas, ([], [])),
-                    export_range,
-                )
-                prepared.append((smooth_vals, smooth_times, raw_vals, raw_times))
+                vals, times = history[lbl][gas]
+                export_vals, export_times = self._filtered_pairs(vals, times, export_range)
+                prepared.append((export_vals, export_times))
 
             for i in range(max_len):
                 row = []
                 t_val = ""
-                for smooth_vals, smooth_times, _, _ in prepared:
-                    times = smooth_times
+                for _, times in prepared:
                     if i < len(times):
                         if is_datetime:
                             t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
@@ -561,13 +563,12 @@ class ConcentrationTab(QWidget):
                             t_val = str(int(times[i]))
                         break
                 row.append(t_val)
-                for smooth_vals, _, raw_vals, _ in prepared:
-                    row.append(f"{smooth_vals[i]:.4f}" if i < len(smooth_vals) else "")
-                    row.append(f"{raw_vals[i]:.4f}" if i < len(raw_vals) else "")
+                for vals, _ in prepared:
+                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
                 writer.writerow(row)
 
-    def _write_csv(self, path: str, group_data: dict, raw_group_data: dict,
-                   gas_names: list[str], export_range: object) -> None:
+    def _write_csv(self, path: str, group_data: dict, gas_names: list[str],
+                   export_range: object) -> None:
         from datetime import datetime as dt_type
         is_datetime = False
         for _, (_, times) in group_data.items():
@@ -577,37 +578,33 @@ class ConcentrationTab(QWidget):
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
+            value_label = "平滑% / Smoothed %" if self._export_smoothed else "原始% / Raw %"
             for name in gas_names:
-                header.extend([f"{name} 平滑% / Smoothed %", f"{name} 原始% / Raw %"])
+                header.append(f"{name} {value_label}")
             writer.writerow(header)
 
             prepared = []
             for name in gas_names:
-                smooth_vals, smooth_times = self._filtered_pairs(
+                export_vals, export_times = self._filtered_pairs(
                     *group_data.get(name, ([], [])),
                     export_range,
                 )
-                raw_vals, raw_times = self._filtered_pairs(
-                    *raw_group_data.get(name, ([], [])),
-                    export_range,
-                )
-                prepared.append((name, smooth_vals, smooth_times, raw_vals, raw_times))
+                prepared.append((name, export_vals, export_times))
 
-            max_len = max((len(vals) for _, vals, _, _, _ in prepared), default=0)
+            max_len = max((len(vals) for _, vals, _ in prepared), default=0)
             for i in range(max_len):
                 row = []
                 t_val = ""
-                for _, _, smooth_times, _, _ in prepared:
-                    if i < len(smooth_times):
+                for _, _, times in prepared:
+                    if i < len(times):
                         if is_datetime:
-                            t_val = smooth_times[i].strftime("%Y-%m-%d %H:%M:%S")
+                            t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
                         else:
-                            t_val = str(int(smooth_times[i]))
+                            t_val = str(int(times[i]))
                         break
                 row.append(t_val)
-                for _, smooth_vals, _, raw_vals, _ in prepared:
-                    row.append(f"{smooth_vals[i]:.4f}" if i < len(smooth_vals) else "")
-                    row.append(f"{raw_vals[i]:.4f}" if i < len(raw_vals) else "")
+                for _, vals, _ in prepared:
+                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
                 writer.writerow(row)
 
     @staticmethod

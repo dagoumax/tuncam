@@ -673,6 +673,7 @@ class MainWindow(QMainWindow):
         self._analyzer.merge_factor = self._settings.get("merge_factor", 1)
         new_smoothing = self._settings.get("concentration_smoothing", "balanced")
         self._concentration_smoother.set_profile(new_smoothing)
+        self._conc_tab.set_export_smoothed(new_smoothing != "off")
 
         if old_gas_signature != new_gas_signature:
             log.info(
