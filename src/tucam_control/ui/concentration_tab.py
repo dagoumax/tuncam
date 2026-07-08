@@ -4,15 +4,10 @@
 from __future__ import annotations
 
 import csv
-import time
-from collections import defaultdict
 from datetime import datetime
 
-import matplotlib.dates as mdates
-import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.figure import Figure
-from PySide6.QtCore import Qt
+import pyqtgraph as pg
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -28,7 +23,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
-from ._mpl_style import COLORS, WINDOW_SIZE, fix_tick_labels
+from ._mpl_style import COLORS, WINDOW_SIZE
 
 
 class ConcentrationTab(QWidget):
@@ -45,8 +40,8 @@ class ConcentrationTab(QWidget):
         self._dirty: bool = False
         self._new_data: bool = False
         self._last_export_dir: str = ""
+        self._display_y_range: tuple[float, float] | None = None
 
-        from PySide6.QtCore import QTimer
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setInterval(500)
         self._redraw_timer.timeout.connect(self._tick_redraw)
@@ -103,15 +98,15 @@ class ConcentrationTab(QWidget):
 
         # -- Right: trend chart --
         right = QVBoxLayout()
-        self._fig = Figure(figsize=(8, 6), dpi=100)
-        self._fig.set_tight_layout(True)
-        self._ax = self._fig.add_subplot(111)
-        self._canvas = FigureCanvasQTAgg(self._fig)
-        right.addWidget(self._canvas, 1)
-
-        self._toolbar = NavigationToolbar2QT(self._canvas, self)
-        self._toolbar.setMaximumHeight(30)
-        right.addWidget(self._toolbar)
+        pg.setConfigOptions(antialias=True)
+        self._plot_widget = pg.PlotWidget()
+        self._plot_widget.setBackground("w")
+        self._plot_item = self._plot_widget.getPlotItem()
+        self._plot_item.showGrid(x=True, y=True, alpha=0.25)
+        self._plot_item.setLabel("left", "浓度 / Concentration (%)")
+        self._plot_item.setLabel("bottom", "时间 / Time (s)")
+        self._legend = self._plot_item.addLegend(offset=(-12, 12))
+        right.addWidget(self._plot_widget, 1)
 
         layout.addLayout(right, 2)
 
@@ -172,6 +167,7 @@ class ConcentrationTab(QWidget):
     def clear_history(self) -> None:
         self._history.clear()
         self._batch_idx = 0
+        self._display_y_range = None
         self._table.setRowCount(0)
         self._total_label.setText("浓度总和 / Total: --")
         self._do_redraw()
@@ -226,16 +222,18 @@ class ConcentrationTab(QWidget):
         if not self.isVisible():
             return
         self._dirty = False
-        self._ax.clear()
+        self._plot_item.clear()
+        self._legend.clear()
 
         glabel = self._group_combo.currentData()
         selected_gas = self._gas_combo.currentData()
         is_all_groups = (glabel == "__all__")
+        series: list[tuple[str, list[float], list[object], str]] = []
+        title = ""
+        color_idx = 0
 
         if is_all_groups and selected_gas == "all":
-            is_datetime = False
             total_pts = 0
-            color_idx = 0
             for lbl in self._group_labels:
                 if lbl not in self._history:
                     continue
@@ -246,24 +244,21 @@ class ConcentrationTab(QWidget):
                     vals, times = gdata[name]
                     if len(vals) == 0:
                         continue
-                    if not is_datetime and len(times) > 0:
-                        is_datetime = isinstance(times[0], datetime)
                     color = COLORS[color_idx % len(COLORS)]
                     color_idx += 1
                     line_label = f"{lbl} {name}"
-                    self._ax.plot(times, vals, color=color, linewidth=0.8,
-                                  label=line_label, marker=".", markersize=1)
+                    series.append((line_label, vals, times, color))
                     total_pts += len(vals)
-            self._ax.set_title("浓度变化 [全部行组] / All Groups & Gases")
+            title = "浓度变化 [全部行组] / All Groups & Gases"
             self._pt_label.setText(f"数据点 / Points: {total_pts}")
         elif not is_all_groups:
             group_data = self._selected_group_data()
             if not group_data:
-                self._canvas.draw_idle()
+                self._plot_item.setTitle("")
                 return
-            is_datetime, total_pts = self._plot_group_data(group_data, selected_gas, glabel)
+            series, total_pts, title = self._group_series(group_data, selected_gas, glabel)
+            self._pt_label.setText(f"数据点 / Points: {total_pts}")
         else:
-            is_datetime = False
             total_pts = 0
             for i, lbl in enumerate(self._group_labels):
                 if lbl not in self._history:
@@ -274,61 +269,30 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[selected_gas]
                 if len(vals) == 0:
                     continue
-                if not is_datetime and len(times) > 0:
-                    is_datetime = isinstance(times[0], datetime)
                 color = COLORS[i % len(COLORS)]
-                self._ax.plot(times, vals, color=color, linewidth=1.0,
-                              label=lbl, marker=".", markersize=2)
+                series.append((lbl, vals, times, color))
                 total_pts += len(vals)
-            self._ax.set_title(f"浓度变化 [全部行组] / {selected_gas}")
+            title = f"浓度变化 [全部行组] / {selected_gas}"
             self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
-        if is_datetime:
-            self._ax.set_xlabel("系统时间 / System Time")
-            self._ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-            self._fig.autofmt_xdate(rotation=30)
-        else:
-            self._ax.set_xlabel("帧序号 / Frame Index")
-
-        if self._new_data:
-            self._new_data = False
-            if total_pts > WINDOW_SIZE:
-                if is_datetime:
-                    all_t = []
-                    for lbl in self._group_labels:
-                        gdata = self._history.get(lbl, {})
-                        for _, (_, times) in gdata.items():
-                            all_t.extend(times)
-                    if all_t:
-                        all_t.sort()
-                        self._ax.set_xlim(left=all_t[-WINDOW_SIZE], right=all_t[-1])
-                else:
-                    self._ax.set_xlim(left=max(0, total_pts - WINDOW_SIZE), right=total_pts - 0.5)
-            else:
-                self._ax.autoscale()
-
-        self._ax.set_ylabel("浓度 / Concentration (%)")
-        self._ax.grid(True, alpha=0.3)
-        fix_tick_labels(self._ax)
-        has_artists = len(self._ax.get_legend_handles_labels()[0]) > 0
-        show_legend = has_artists and (
-            is_all_groups or selected_gas != "all" or len(self._gas_names) <= 5
+        self._new_data = False
+        is_datetime = self._series_uses_datetime(series)
+        self._plot_item.setTitle(title)
+        self._plot_item.setLabel(
+            "bottom",
+            "时间 / Time (s)" if is_datetime else "帧序号 / Frame Index",
         )
-        if show_legend:
-            self._ax.legend(loc="upper right", fontsize=7)
-        elif has_artists:
-            self._ax.legend(loc="upper right", fontsize=7, ncol=2)
-        self._canvas.draw_idle()
+        self._draw_series(series, is_datetime)
 
-    def _plot_group_data(self, group_data: dict, selected_gas: str, glabel: str) -> tuple[bool, int]:
-        """Plot data for a single group. Returns (is_datetime, total_pts)."""
-        is_datetime = False
-        for _, (_, times) in group_data.items():
-            if len(times) > 0:
-                is_datetime = isinstance(times[0], datetime)
-                break
+    def _group_series(
+        self,
+        group_data: dict,
+        selected_gas: str,
+        glabel: str,
+    ) -> tuple[list[tuple[str, list[float], list[object], str]], int, str]:
+        """Build visible series for a single group."""
+        series = []
         total_pts = sum(len(v) for v, _ in group_data.values())
-        self._pt_label.setText(f"数据点 / Points: {total_pts}")
 
         if selected_gas == "all":
             for i, name in enumerate(self._gas_names):
@@ -337,19 +301,108 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[name]
                 if len(vals) == 0:
                     continue
-                self._ax.plot(times, vals, color=COLORS[i % len(COLORS)],
-                              linewidth=1.0, label=name, marker=".", markersize=2)
-            self._ax.set_title(f"浓度变化 [{glabel}] / All Gases")
+                series.append((name, vals, times, COLORS[i % len(COLORS)]))
+            title = f"浓度变化 [{glabel}] / All Gases"
         else:
             if selected_gas in group_data:
                 vals, times = group_data[selected_gas]
                 if len(vals) > 0:
                     idx = self._gas_names.index(selected_gas) if selected_gas in self._gas_names else 0
                     color = COLORS[idx % len(COLORS)]
-                    self._ax.plot(times, vals, color=color, linewidth=1.2,
-                                  label=selected_gas, marker=".", markersize=2)
-            self._ax.set_title(f"浓度变化 [{glabel}] / {selected_gas}")
-        return is_datetime, total_pts
+                    series.append((selected_gas, vals, times, color))
+            title = f"浓度变化 [{glabel}] / {selected_gas}"
+        return series, total_pts, title
+
+    def _draw_series(self, series: list[tuple[str, list[float], list[object], str]],
+                     is_datetime: bool) -> None:
+        if not series:
+            return
+
+        time_origin = self._time_origin(series) if is_datetime else None
+        all_x: list[float] = []
+        all_y: list[float] = []
+        show_legend = len(series) <= 24
+
+        for label, vals, times, color in series:
+            clipped_vals = vals[-WINDOW_SIZE:]
+            clipped_times = times[-WINDOW_SIZE:]
+            x_vals = self._x_values(clipped_times, is_datetime, time_origin)
+            y_vals = [float(v) for v in clipped_vals]
+            if not x_vals or not y_vals:
+                continue
+
+            all_x.extend(x_vals)
+            all_y.extend(y_vals)
+            pen = pg.mkPen(color=color, width=1.4)
+            name = label if show_legend else None
+            self._plot_item.plot(x_vals, y_vals, pen=pen, name=name)
+            self._plot_item.plot(
+                [x_vals[-1]],
+                [y_vals[-1]],
+                pen=None,
+                symbol="o",
+                symbolSize=6,
+                symbolBrush=color,
+                symbolPen=pg.mkPen(color=color),
+            )
+
+        self._apply_ranges(all_x, all_y)
+
+    @staticmethod
+    def _series_uses_datetime(series: list[tuple[str, list[float], list[object], str]]) -> bool:
+        for _, _, times, _ in series:
+            if times:
+                return isinstance(times[0], datetime)
+        return False
+
+    @staticmethod
+    def _time_origin(series: list[tuple[str, list[float], list[object], str]]) -> datetime | None:
+        first_times = [
+            times[-min(len(times), WINDOW_SIZE)]
+            for _, _, times, _ in series
+            if times and isinstance(times[0], datetime)
+        ]
+        return min(first_times) if first_times else None
+
+    @staticmethod
+    def _x_values(times: list[object], is_datetime: bool,
+                  origin: datetime | None) -> list[float]:
+        if is_datetime and origin is not None:
+            return [
+                float((t - origin).total_seconds()) if isinstance(t, datetime) else float(t)
+                for t in times
+            ]
+        return [float(t) for t in times]
+
+    def _apply_ranges(self, x_vals: list[float], y_vals: list[float]) -> None:
+        if not x_vals or not y_vals:
+            return
+        x_min = min(x_vals)
+        x_max = max(x_vals)
+        if x_max <= x_min:
+            x_max = x_min + 1.0
+        self._plot_widget.setXRange(x_min, x_max, padding=0.02)
+
+        y_min = min(y_vals)
+        y_max = max(y_vals)
+        if y_max <= y_min:
+            pad = max(1.0, abs(y_max) * 0.1)
+            target = (y_min - pad, y_max + pad)
+        else:
+            pad = max(1.0, (y_max - y_min) * 0.12)
+            target = (max(0.0, y_min - pad), min(100.0, y_max + pad))
+
+        if self._display_y_range is None:
+            self._display_y_range = target
+        else:
+            old_min, old_max = self._display_y_range
+            target_min, target_max = target
+            alpha = 0.25
+            self._display_y_range = (
+                old_min + alpha * (target_min - old_min),
+                old_max + alpha * (target_max - old_max),
+            )
+        self._plot_widget.setYRange(*self._display_y_range, padding=0.0)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
