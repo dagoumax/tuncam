@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..camera import CameraController
+from ..concentration_smoother import AdaptiveConcentrationSmoother
 from ..data_processor import DataProcessor
 from ..debug_log import get_debug_logger
 from ..gas_analyzer import GasAnalyzer
@@ -119,6 +120,7 @@ class MainWindow(QMainWindow):
         self._processor = DataProcessor()
         self._analyzer = GasAnalyzer()
         self._analyzer.gases = GasAnalyzer.default_gases()
+        self._concentration_smoother = AdaptiveConcentrationSmoother()
         self._settings: dict = {
             "exposure_time_ms": 1000.0,
             "temperature_c": -10.0,
@@ -133,6 +135,7 @@ class MainWindow(QMainWindow):
             "arpls_lam": 1e5,
             "arpls_max_iter": 50,
             "arpls_tol": 1e-6,
+            "concentration_smoothing": "balanced",
         }
         self._was_connected = False
         self._disconnect_warned = False
@@ -647,6 +650,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        old_gas_signature = self._gas_signature(self._analyzer.gases)
+        new_gas_signature = self._gas_signature(updates.get("gas_configs", self._analyzer.gases))
+        old_smoothing = self._settings.get("concentration_smoothing", "balanced")
+
         self._settings.update(updates)
         self._processing_generation += 1
         if self._camera.is_open:
@@ -664,6 +671,21 @@ class MainWindow(QMainWindow):
         if gas_configs is not None:
             self._analyzer.gases = gas_configs
         self._analyzer.merge_factor = self._settings.get("merge_factor", 1)
+        new_smoothing = self._settings.get("concentration_smoothing", "balanced")
+        self._concentration_smoother.set_profile(new_smoothing)
+
+        if old_gas_signature != new_gas_signature:
+            log.info(
+                "Gas configuration changed; clearing concentration history: old=%s new=%s",
+                old_gas_signature,
+                new_gas_signature,
+            )
+            self._concentration_smoother.reset()
+            self._conc_tab.clear_history()
+            self._conc_tab.set_gas_names([g.name for g in self._analyzer.gases])
+        elif old_smoothing != new_smoothing:
+            log.info("Concentration smoothing changed: old=%s new=%s", old_smoothing, new_smoothing)
+            self._conc_tab.clear_history()
 
         self._reprocess_cached()
 
@@ -707,8 +729,13 @@ class MainWindow(QMainWindow):
 
             self._conc_tab.set_gas_names(payload["gas_names"])
             if payload["all_results"]:
-                self._conc_tab.add_data_point(
+                display_results = self._concentration_smoother.smooth_groups(
                     payload["all_results"],
+                    payload["labels"],
+                    payload["mode"],
+                )
+                self._conc_tab.add_data_point(
+                    display_results,
                     payload["labels"],
                     mode=payload["mode"],
                 )
@@ -723,6 +750,19 @@ class MainWindow(QMainWindow):
                 f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
             )
         self._start_pending_processing()
+
+    @staticmethod
+    def _gas_signature(configs: list) -> tuple:
+        return tuple(
+            (
+                cfg.name,
+                int(cfg.position),
+                int(cfg.window),
+                round(float(cfg.coefficient), 12),
+                round(float(cfg.raman_shift), 6),
+            )
+            for cfg in configs
+        )
 
     @Slot(str)
     def _on_processing_failed(self, message: str) -> None:

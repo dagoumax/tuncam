@@ -108,6 +108,14 @@ class SettingsTab(QWidget):
         self._merge_spin.setToolTip("1 = 不合并, 2 = 每2列取平均, ...")
         proc_form.addRow("列合并因子 / Merge Factor:", self._merge_spin)
 
+        self._smooth_combo = QComboBox()
+        self._smooth_combo.addItem("关闭 / Off", "off")
+        self._smooth_combo.addItem("稳健 / Steady", "steady")
+        self._smooth_combo.addItem("均衡 / Balanced (默认)", "balanced")
+        self._smooth_combo.addItem("灵敏 / Responsive", "responsive")
+        self._smooth_combo.setCurrentIndex(2)
+        proc_form.addRow("浓度平滑 / Concentration Smoothing:", self._smooth_combo)
+
         layout.addWidget(proc_gb)
 
         # ---- arPLS baseline correction ----
@@ -322,6 +330,7 @@ class SettingsTab(QWidget):
             "save_dir": self._save_dir_edit.text().strip(),
             "row_groups_text": raw_text,
             "merge_factor": self._merge_spin.value(),
+            "concentration_smoothing": self._smooth_combo.currentData(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),
             "arpls_mode": self._arpls_mode_combo.currentData(),
             "arpls_lam": self._arpls_lam_spin.value(),
