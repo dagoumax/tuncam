@@ -25,6 +25,9 @@ from PySide6.QtWidgets import (
 
 from ._mpl_style import COLORS, WINDOW_SIZE
 
+MIN_TIME_SPAN_SECONDS = 30.0
+MIN_INDEX_SPAN = 20.0
+
 
 class ConcentrationTab(QWidget):
     """Fourth tab: current concentrations table + trend chart (multi-group)."""
@@ -434,9 +437,14 @@ class ConcentrationTab(QWidget):
             return
         x_min = min(x_vals)
         x_max = max(x_vals)
+        min_span = MIN_TIME_SPAN_SECONDS if self._mode == "time" else MIN_INDEX_SPAN
         if x_max <= x_min:
-            x_max = x_min + 1.0
-        self._plot_widget.setXRange(x_min, x_max, padding=0.02)
+            x_max = x_min + min_span
+        current_span = x_max - x_min
+        if current_span < min_span:
+            x_min = max(0.0, x_max - min_span)
+            x_max = x_min + min_span
+        self._plot_widget.setXRange(x_min, x_max, padding=0.01)
 
         y_min = min(y_vals)
         y_max = max(y_vals)
