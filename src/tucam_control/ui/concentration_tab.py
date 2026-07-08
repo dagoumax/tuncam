@@ -33,6 +33,7 @@ class ConcentrationTab(QWidget):
         super().__init__()
         # _history[group_label][gas_name] = (vals, times)
         self._history: dict[str, dict[str, tuple[list[float], list[object]]]] = {}
+        self._raw_history: dict[str, dict[str, tuple[list[float], list[object]]]] = {}
         self._gas_names: list[str] = []
         self._group_labels: list[str] = []
         self._batch_idx: int = 0
@@ -80,6 +81,15 @@ class ConcentrationTab(QWidget):
         self._gas_combo.currentIndexChanged.connect(self._do_redraw)
         ctrl_layout.addWidget(self._gas_combo)
 
+        ctrl_layout.addWidget(QLabel("显示范围 / Display Range:"))
+        self._display_range_combo = QComboBox()
+        self._display_range_combo.addItem("最近100点 / Last 100 points", "visible")
+        self._display_range_combo.addItem("最近10分钟 / Last 10 min", 600)
+        self._display_range_combo.addItem("最近1小时 / Last 1 hour", 3600)
+        self._display_range_combo.addItem("全部历史 / All History", "all")
+        self._display_range_combo.currentIndexChanged.connect(self._do_redraw)
+        ctrl_layout.addWidget(self._display_range_combo)
+
         btn_row = QHBoxLayout()
         self._btn_clear = QPushButton("清除历史 / Clear")
         self._btn_clear.clicked.connect(self._on_clear)
@@ -88,6 +98,14 @@ class ConcentrationTab(QWidget):
         btn_row.addWidget(self._btn_clear)
         btn_row.addWidget(self._btn_export)
         ctrl_layout.addLayout(btn_row)
+
+        ctrl_layout.addWidget(QLabel("导出范围 / Export Range:"))
+        self._export_range_combo = QComboBox()
+        self._export_range_combo.addItem("全部历史 / All History", "all")
+        self._export_range_combo.addItem("最近10分钟 / Last 10 min", 600)
+        self._export_range_combo.addItem("最近1小时 / Last 1 hour", 3600)
+        self._export_range_combo.addItem("当前显示窗口 / Visible Window", "visible")
+        ctrl_layout.addWidget(self._export_range_combo)
 
         self._pt_label = QLabel("数据点 / Points: 0")
         ctrl_layout.addWidget(self._pt_label)
@@ -130,8 +148,13 @@ class ConcentrationTab(QWidget):
             self._group_combo.setCurrentIndex(self._group_combo.findData(current))
         self._group_combo.blockSignals(False)
 
-    def add_data_point(self, all_group_results: list, group_labels: list[str],
-                       mode: str = "time") -> None:
+    def add_data_point(
+        self,
+        all_group_results: list,
+        group_labels: list[str],
+        mode: str = "time",
+        raw_group_results: list | None = None,
+    ) -> None:
         """
         Add a measurement point for all row groups.
 
@@ -145,16 +168,13 @@ class ConcentrationTab(QWidget):
         else:
             t = datetime.now()
 
-        for glabel, gas_results in zip(group_labels, all_group_results):
-            if glabel not in self._history:
-                self._history[glabel] = {}
-            group_map = self._history[glabel]
-            for r in gas_results:
-                if r.name not in group_map:
-                    group_map[r.name] = ([], [])
-                vals, times = group_map[r.name]
-                vals.append(r.concentration * 100)
-                times.append(t)
+        self._append_results(self._history, all_group_results, group_labels, t)
+        self._append_results(
+            self._raw_history,
+            raw_group_results if raw_group_results is not None else all_group_results,
+            group_labels,
+            t,
+        )
 
         self.set_group_labels(group_labels)
         self.set_gas_names([r.name for r in all_group_results[0]])
@@ -166,6 +186,7 @@ class ConcentrationTab(QWidget):
 
     def clear_history(self) -> None:
         self._history.clear()
+        self._raw_history.clear()
         self._batch_idx = 0
         self._display_y_range = None
         self._table.setRowCount(0)
@@ -204,6 +225,20 @@ class ConcentrationTab(QWidget):
                 i, 2, QTableWidgetItem(f"{r.concentration * 100:.2f} %")
             )
         self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
+
+    @staticmethod
+    def _append_results(history: dict, all_group_results: list, group_labels: list[str],
+                        t: object) -> None:
+        for glabel, gas_results in zip(group_labels, all_group_results):
+            if glabel not in history:
+                history[glabel] = {}
+            group_map = history[glabel]
+            for r in gas_results:
+                if r.name not in group_map:
+                    group_map[r.name] = ([], [])
+                vals, times = group_map[r.name]
+                vals.append(r.concentration * 100)
+                times.append(t)
 
     def _redraw(self) -> None:
         """Request a redraw (periodic — starts timer if not running)."""
@@ -324,8 +359,7 @@ class ConcentrationTab(QWidget):
         show_legend = len(series) <= 24
 
         for label, vals, times, color in series:
-            clipped_vals = vals[-WINDOW_SIZE:]
-            clipped_times = times[-WINDOW_SIZE:]
+            clipped_vals, clipped_times = self._clip_for_display(vals, times)
             x_vals = self._x_values(clipped_times, is_datetime, time_origin)
             y_vals = [float(v) for v in clipped_vals]
             if not x_vals or not y_vals:
@@ -355,13 +389,12 @@ class ConcentrationTab(QWidget):
                 return isinstance(times[0], datetime)
         return False
 
-    @staticmethod
-    def _time_origin(series: list[tuple[str, list[float], list[object], str]]) -> datetime | None:
-        first_times = [
-            times[-min(len(times), WINDOW_SIZE)]
-            for _, _, times, _ in series
-            if times and isinstance(times[0], datetime)
-        ]
+    def _time_origin(self, series: list[tuple[str, list[float], list[object], str]]) -> datetime | None:
+        first_times = []
+        for _, vals, times, _ in series:
+            _, clipped_times = self._clip_for_display(vals, times)
+            if clipped_times and isinstance(clipped_times[0], datetime):
+                first_times.append(clipped_times[0])
         return min(first_times) if first_times else None
 
     @staticmethod
@@ -373,6 +406,24 @@ class ConcentrationTab(QWidget):
                 for t in times
             ]
         return [float(t) for t in times]
+
+    def _clip_for_display(self, vals: list[float],
+                          times: list[object]) -> tuple[list[float], list[object]]:
+        display_range = self._display_range_combo.currentData()
+        if display_range == "all":
+            return vals, times
+        if isinstance(display_range, int) and times and isinstance(times[-1], datetime):
+            cutoff = times[-1].timestamp() - display_range
+            pairs = [
+                (v, t)
+                for v, t in zip(vals, times)
+                if isinstance(t, datetime) and t.timestamp() >= cutoff
+            ]
+            if not pairs:
+                return [], []
+            out_vals, out_times = zip(*pairs)
+            return list(out_vals), list(out_times)
+        return vals[-WINDOW_SIZE:], times[-WINDOW_SIZE:]
 
     def _apply_ranges(self, x_vals: list[float], y_vals: list[float]) -> None:
         if not x_vals or not y_vals:
@@ -440,23 +491,25 @@ class ConcentrationTab(QWidget):
         self._last_export_dir = path
 
         try:
-            from datetime import datetime as dt_type
             gas_names = sorted(self._gas_names)
+            export_range = self._export_range_combo.currentData()
             if not is_all_groups:
                 group_data = self._selected_group_data()
-                self._write_csv(path, group_data, gas_names)
+                raw_group_data = self._raw_history.get(glabel, {})
+                self._write_csv(path, group_data, raw_group_data, gas_names, export_range)
             else:
                 if not self._group_labels or not self._history:
                     QMessageBox.information(self, "导出", "没有数据。")
                     return
-                self._write_csv_all_groups(path, gas_names)
+                self._write_csv_all_groups(path, gas_names, export_range)
 
             QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
 
-    def _write_csv_all_groups(self, path: str, gas_names: list[str]) -> None:
-        """Export all groups: columns = Time + GasName(GroupLabel) for each."""
+    def _write_csv_all_groups(self, path: str, gas_names: list[str],
+                              export_range: object) -> None:
+        """Export all groups: columns include smoothed and raw concentrations."""
         from datetime import datetime as dt_type
         is_datetime = False
         for lbl in self._group_labels:
@@ -475,20 +528,32 @@ class ConcentrationTab(QWidget):
 
         max_len = 0
         for gas, lbl, _ in columns:
-            vals, _ = self._history[lbl][gas]
-            max_len = max(max_len, len(vals))
+            vals, times = self._history[lbl][gas]
+            filtered = self._filtered_pairs(vals, times, export_range)
+            max_len = max(max_len, len(filtered[0]))
 
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            header += [h for _, _, h in columns]
+            for _, _, h in columns:
+                header.extend([f"{h} 平滑% / Smoothed %", f"{h} 原始% / Raw %"])
             writer.writerow(header)
+
+            prepared = []
+            for gas, lbl, _ in columns:
+                vals, times = self._history[lbl][gas]
+                smooth_vals, smooth_times = self._filtered_pairs(vals, times, export_range)
+                raw_vals, raw_times = self._filtered_pairs(
+                    *self._raw_history.get(lbl, {}).get(gas, ([], [])),
+                    export_range,
+                )
+                prepared.append((smooth_vals, smooth_times, raw_vals, raw_times))
 
             for i in range(max_len):
                 row = []
                 t_val = ""
-                for gas, lbl, _ in columns:
-                    _, times = self._history[lbl][gas]
+                for smooth_vals, smooth_times, _, _ in prepared:
+                    times = smooth_times
                     if i < len(times):
                         if is_datetime:
                             t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
@@ -496,12 +561,13 @@ class ConcentrationTab(QWidget):
                             t_val = str(int(times[i]))
                         break
                 row.append(t_val)
-                for gas, lbl, _ in columns:
-                    vals, _ = self._history[lbl][gas]
-                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
+                for smooth_vals, _, raw_vals, _ in prepared:
+                    row.append(f"{smooth_vals[i]:.4f}" if i < len(smooth_vals) else "")
+                    row.append(f"{raw_vals[i]:.4f}" if i < len(raw_vals) else "")
                 writer.writerow(row)
 
-    def _write_csv(self, path: str, group_data: dict, gas_names: list[str]) -> None:
+    def _write_csv(self, path: str, group_data: dict, raw_group_data: dict,
+                   gas_names: list[str], export_range: object) -> None:
         from datetime import datetime as dt_type
         is_datetime = False
         for _, (_, times) in group_data.items():
@@ -511,27 +577,53 @@ class ConcentrationTab(QWidget):
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            header += gas_names
+            for name in gas_names:
+                header.extend([f"{name} 平滑% / Smoothed %", f"{name} 原始% / Raw %"])
             writer.writerow(header)
 
-            max_len = max((len(vals) for vals, _ in group_data.values()), default=0)
+            prepared = []
+            for name in gas_names:
+                smooth_vals, smooth_times = self._filtered_pairs(
+                    *group_data.get(name, ([], [])),
+                    export_range,
+                )
+                raw_vals, raw_times = self._filtered_pairs(
+                    *raw_group_data.get(name, ([], [])),
+                    export_range,
+                )
+                prepared.append((name, smooth_vals, smooth_times, raw_vals, raw_times))
+
+            max_len = max((len(vals) for _, vals, _, _, _ in prepared), default=0)
             for i in range(max_len):
                 row = []
                 t_val = ""
-                for name in gas_names:
-                    if name in group_data:
-                        _, times = group_data[name]
-                        if i < len(times):
-                            if is_datetime:
-                                t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
-                            else:
-                                t_val = str(int(times[i]))
-                            break
+                for _, _, smooth_times, _, _ in prepared:
+                    if i < len(smooth_times):
+                        if is_datetime:
+                            t_val = smooth_times[i].strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            t_val = str(int(smooth_times[i]))
+                        break
                 row.append(t_val)
-                for name in gas_names:
-                    if name in group_data:
-                        vals, _ = group_data[name]
-                        row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
-                    else:
-                        row.append("")
+                for _, smooth_vals, _, raw_vals, _ in prepared:
+                    row.append(f"{smooth_vals[i]:.4f}" if i < len(smooth_vals) else "")
+                    row.append(f"{raw_vals[i]:.4f}" if i < len(raw_vals) else "")
                 writer.writerow(row)
+
+    @staticmethod
+    def _filtered_pairs(vals: list[float], times: list[object],
+                        export_range: object) -> tuple[list[float], list[object]]:
+        if export_range == "visible":
+            return vals[-WINDOW_SIZE:], times[-WINDOW_SIZE:]
+        if isinstance(export_range, int) and times and isinstance(times[-1], datetime):
+            cutoff = times[-1].timestamp() - export_range
+            pairs = [
+                (v, t)
+                for v, t in zip(vals, times)
+                if isinstance(t, datetime) and t.timestamp() >= cutoff
+            ]
+            if not pairs:
+                return [], []
+            out_vals, out_times = zip(*pairs)
+            return list(out_vals), list(out_times)
+        return vals, times

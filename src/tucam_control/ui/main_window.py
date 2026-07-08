@@ -738,6 +738,7 @@ class MainWindow(QMainWindow):
                     display_results,
                     payload["labels"],
                     mode=payload["mode"],
+                    raw_group_results=payload["all_results"],
                 )
             log.info(
                 "Processing finished: duration_ms=%.1f result_shape=%s labels=%s mode=%s",
