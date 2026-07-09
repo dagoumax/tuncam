@@ -49,6 +49,11 @@ def sdk_diagnostics() -> dict[str, object]:
     }
 
 
+def sdk_config_path_bytes() -> bytes:
+    """Return a stable SDK config path independent of the process cwd."""
+    return str(_PROJECT_ROOT).encode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------

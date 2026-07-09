@@ -57,6 +57,7 @@ from .TUCam import (
     TUCAM_Prop_SetValue,
     TUCAM_Reg_Read,
     describe_tucam_ret,
+    sdk_config_path_bytes,
     sdk_diagnostics,
 )
 
@@ -125,7 +126,7 @@ class CameraController:
             return self._cam_count
         log.info("SDK diagnostics: %s", sdk_diagnostics())
         log.info("Calling TUCAM_Api_Init")
-        init_param = TUCAM_INIT(0, b"./")
+        init_param = TUCAM_INIT(0, sdk_config_path_bytes())
         result = TUCAM_Api_Init(pointer(init_param), 5000)
         log.info("TUCAM_Api_Init returned %s; cam_count=%s", describe_tucam_ret(result), init_param.uiCamCount)
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
@@ -290,6 +291,8 @@ class CameraController:
             self._hcam, TUCAM_IDPROP.TUIDP_EXPOSURETM.value, c_double(time_ms), 0
         )
         log.info("Set exposure %.3f ms returned %s", time_ms, describe_tucam_ret(result))
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Set exposure failed: {describe_tucam_ret(result)}")
 
     def configure_scientific_frame_format(self) -> None:
         """Prefer raw/high-bit-depth frames over RGB preview frames."""
@@ -348,6 +351,8 @@ class CameraController:
             self._hcam, TUCAM_IDPROP.TUIDP_EXPOSURETM.value, byref(val), 0
         )
         log.debug("TUCAM_Prop_GetValue(EXPOSURETM) returned %s; value=%s", describe_tucam_ret(result), val.value)
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get exposure failed: {describe_tucam_ret(result)}")
         return val.value
 
     def get_exposure_range(self) -> tuple[float, float]:
@@ -356,7 +361,9 @@ class CameraController:
         attr = TUCAM_PROP_ATTR()
         attr.idProp = TUCAM_IDPROP.TUIDP_EXPOSURETM.value
         attr.nIdxChn = 0
-        TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
+        result = TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get exposure range failed: {describe_tucam_ret(result)}")
         return (attr.dbValMin, attr.dbValMax)
 
     # ------------------------------------------------------------------
@@ -372,6 +379,8 @@ class CameraController:
             self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value, c_double(temp_c), 0
         )
         log.info("Set temperature %.3f C returned %s", temp_c, describe_tucam_ret(result))
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Set temperature target failed: {describe_tucam_ret(result)}")
 
     def get_temperature_target(self) -> float:
         """Get current target temperature in Celsius."""
@@ -385,6 +394,8 @@ class CameraController:
             describe_tucam_ret(result),
             val.value,
         )
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get temperature target failed: {describe_tucam_ret(result)}")
         return val.value
 
     def get_temperature_range(self) -> tuple[float, float]:
@@ -393,7 +404,9 @@ class CameraController:
         attr = TUCAM_PROP_ATTR()
         attr.idProp = TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value
         attr.nIdxChn = 0
-        TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
+        result = TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get temperature range failed: {describe_tucam_ret(result)}")
         return (attr.dbValMin, attr.dbValMax)
 
     # ------------------------------------------------------------------
@@ -421,6 +434,8 @@ class CameraController:
             log.warning("Failed to query fan gear attr: %s", exc)
         result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_FAN_GEAR.value, gear)
         log.info("Set fan gear %s returned %s", gear, describe_tucam_ret(result))
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Set fan gear failed: {describe_tucam_ret(result)}")
         try:
             current = self.get_fan_gear()
             log.info("Fan gear readback after set: %s", current)
@@ -476,14 +491,18 @@ class CameraController:
             raise ValueError(f"Invalid mode: {mode}")
         result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_IMGMODESELECT.value, mode)
         log.info("Set working mode %s returned %s", mode, describe_tucam_ret(result))
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Set working mode failed: {describe_tucam_ret(result)}")
 
     def get_working_mode(self) -> int:
         """Get current working mode."""
         self._check_open()
         val = c_int32(0)
-        TUCAM_Capa_GetValue(
+        result = TUCAM_Capa_GetValue(
             self._hcam, TUCAM_IDCAPA.TUIDC_IMGMODESELECT.value, byref(val)
         )
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get working mode failed: {describe_tucam_ret(result)}")
         return val.value
 
     # ------------------------------------------------------------------
@@ -598,10 +617,20 @@ class CameraController:
         w, h = frame.usWidth, frame.usHeight
         elem_bytes = frame.ucElemBytes
         total_size = frame.uiImgSize
+        if not frame.pBuffer:
+            raise RuntimeError("Frame buffer pointer is null")
+        if w <= 0 or h <= 0:
+            raise RuntimeError(f"Invalid frame dimensions: {w}x{h}")
+        if elem_bytes <= 0:
+            raise RuntimeError(f"Invalid frame element size: {elem_bytes}")
+        if total_size <= 0:
+            raise RuntimeError(f"Invalid frame image size: {total_size}")
         row_step = frame.uiWidthStep or (w * max(1, elem_bytes))
         channels = frame.ucChannels or max(1, row_step // max(1, w * max(1, elem_bytes)))
         data_offset = frame.usOffset or frame.usHeader
         payload_size = min(total_size, row_step * h) if row_step > 0 else total_size
+        if row_step <= 0 or payload_size <= 0:
+            raise RuntimeError(f"Invalid frame stride/payload: row_step={row_step} payload={payload_size}")
 
         buf = create_string_buffer(payload_size)
         ptr_data = c_void_p(frame.pBuffer + data_offset)
@@ -610,16 +639,28 @@ class CameraController:
         if elem_bytes == 1:
             raw = np.frombuffer(buf, dtype=np.uint8, count=payload_size)
             if row_step >= w * channels and channels > 1:
+                if payload_size < row_step * h:
+                    raise RuntimeError(
+                        f"Frame payload too small for multi-channel rows: payload={payload_size} expected={row_step * h}"
+                    )
                 rows = raw[: row_step * h].reshape((h, row_step))
                 planes = rows[:, : w * channels].reshape((h, w, channels))
                 arr = planes.max(axis=2)
                 log.debug("Converted multi-channel uint8 frame using max projection channels=%s", channels)
                 return arr.copy()
+            if payload_size < w * h:
+                raise RuntimeError(
+                    f"Frame payload too small for uint8 image: payload={payload_size} expected={w * h}"
+                )
             arr = raw[: w * h].reshape((h, w))
             return arr.copy()
 
         bytes_per_pixel = max(2, elem_bytes)
         if row_step >= w * bytes_per_pixel:
+            if payload_size < row_step * h:
+                raise RuntimeError(
+                    f"Frame payload too small for padded rows: payload={payload_size} expected={row_step * h}"
+                )
             raw = np.frombuffer(buf, dtype=np.uint8, count=payload_size)
             rows = raw[: row_step * h].reshape((h, row_step))
             pixel_bytes = rows[:, : w * bytes_per_pixel].reshape((h, w, bytes_per_pixel))
@@ -630,6 +671,10 @@ class CameraController:
                 arr = arr32[:, :, 0] | (arr32[:, :, 1] << 8) | (arr32[:, :, 2] << 16)
             return arr.copy()
 
+        if payload_size < w * h * 2:
+            raise RuntimeError(
+                f"Frame payload too small for uint16 image: payload={payload_size} expected={w * h * 2}"
+            )
         arr = np.frombuffer(buf, dtype=np.uint16, count=w * h).reshape((h, w))
         return arr.copy()
 
