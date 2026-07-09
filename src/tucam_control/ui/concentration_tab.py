@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime
+import time
 
+import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -27,6 +29,9 @@ from ._mpl_style import COLORS, WINDOW_SIZE
 
 MIN_TIME_SPAN_SECONDS = 30.0
 MIN_INDEX_SPAN = 20.0
+DISPLAY_ANIMATION_DURATION_S = 0.95
+DISPLAY_ANIMATION_INTERVAL_MS = 33
+DISPLAY_TAIL_SEGMENTS = 10
 
 
 class ConcentrationTab(QWidget):
@@ -46,9 +51,10 @@ class ConcentrationTab(QWidget):
         self._last_export_dir: str = ""
         self._display_y_range: tuple[float, float] | None = None
         self._export_smoothed: bool = True
+        self._display_animation: dict[tuple[str, str], dict[str, float]] = {}
 
         self._redraw_timer = QTimer(self)
-        self._redraw_timer.setInterval(500)
+        self._redraw_timer.setInterval(DISPLAY_ANIMATION_INTERVAL_MS)
         self._redraw_timer.timeout.connect(self._tick_redraw)
         self._setup_ui()
 
@@ -182,6 +188,7 @@ class ConcentrationTab(QWidget):
             group_labels,
             t,
         )
+        self._update_display_animation(all_group_results, group_labels)
 
         self.set_group_labels(group_labels)
         self.set_gas_names([r.name for r in all_group_results[0]])
@@ -194,6 +201,7 @@ class ConcentrationTab(QWidget):
     def clear_history(self) -> None:
         self._history.clear()
         self._raw_history.clear()
+        self._display_animation.clear()
         self._batch_idx = 0
         self._display_y_range = None
         self._table.setRowCount(0)
@@ -255,7 +263,7 @@ class ConcentrationTab(QWidget):
 
     def _tick_redraw(self) -> None:
         """Periodic tick: redraw if dirty, stop timer if not."""
-        if self._dirty:
+        if self._dirty or self._has_active_animation():
             self._do_redraw()
         else:
             self._redraw_timer.stop()
@@ -270,7 +278,7 @@ class ConcentrationTab(QWidget):
         glabel = self._group_combo.currentData()
         selected_gas = self._gas_combo.currentData()
         is_all_groups = (glabel == "__all__")
-        series: list[tuple[str, list[float], list[object], str]] = []
+        series: list[tuple[str, list[float], list[object], str, tuple[str, str]]] = []
         title = ""
         color_idx = 0
 
@@ -289,7 +297,7 @@ class ConcentrationTab(QWidget):
                     color = COLORS[color_idx % len(COLORS)]
                     color_idx += 1
                     line_label = f"{lbl} {name}"
-                    series.append((line_label, vals, times, color))
+                    series.append((line_label, vals, times, color, (lbl, name)))
                     total_pts += len(vals)
             title = "浓度变化 [全部行组] / All Groups & Gases"
             self._pt_label.setText(f"数据点 / Points: {total_pts}")
@@ -312,7 +320,7 @@ class ConcentrationTab(QWidget):
                 if len(vals) == 0:
                     continue
                 color = COLORS[i % len(COLORS)]
-                series.append((lbl, vals, times, color))
+                series.append((lbl, vals, times, color, (lbl, selected_gas)))
                 total_pts += len(vals)
             title = f"浓度变化 [全部行组] / {selected_gas}"
             self._pt_label.setText(f"数据点 / Points: {total_pts}")
@@ -331,7 +339,7 @@ class ConcentrationTab(QWidget):
         group_data: dict,
         selected_gas: str,
         glabel: str,
-    ) -> tuple[list[tuple[str, list[float], list[object], str]], int, str]:
+    ) -> tuple[list[tuple[str, list[float], list[object], str, tuple[str, str]]], int, str]:
         """Build visible series for a single group."""
         series = []
         total_pts = sum(len(v) for v, _ in group_data.values())
@@ -343,7 +351,7 @@ class ConcentrationTab(QWidget):
                 vals, times = group_data[name]
                 if len(vals) == 0:
                     continue
-                series.append((name, vals, times, COLORS[i % len(COLORS)]))
+                series.append((name, vals, times, COLORS[i % len(COLORS)], (glabel, name)))
             title = f"浓度变化 [{glabel}] / All Gases"
         else:
             if selected_gas in group_data:
@@ -351,12 +359,15 @@ class ConcentrationTab(QWidget):
                 if len(vals) > 0:
                     idx = self._gas_names.index(selected_gas) if selected_gas in self._gas_names else 0
                     color = COLORS[idx % len(COLORS)]
-                    series.append((selected_gas, vals, times, color))
+                    series.append((selected_gas, vals, times, color, (glabel, selected_gas)))
             title = f"浓度变化 [{glabel}] / {selected_gas}"
         return series, total_pts, title
 
-    def _draw_series(self, series: list[tuple[str, list[float], list[object], str]],
-                     is_datetime: bool) -> None:
+    def _draw_series(
+        self,
+        series: list[tuple[str, list[float], list[object], str, tuple[str, str]]],
+        is_datetime: bool,
+    ) -> None:
         if not series:
             return
 
@@ -365,12 +376,29 @@ class ConcentrationTab(QWidget):
         all_y: list[float] = []
         show_legend = len(series) <= 24
 
-        for label, vals, times, color in series:
+        live_x_max = None
+
+        for label, vals, times, color, series_key in series:
             clipped_vals, clipped_times = self._clip_for_display(vals, times)
             x_vals = self._x_values(clipped_times, is_datetime, time_origin)
             y_vals = [float(v) for v in clipped_vals]
             if not x_vals or not y_vals:
                 continue
+
+            if is_datetime and len(x_vals) >= 2:
+                progress = self._time_aligned_display_progress(clipped_times)
+                animated_last = self._current_display_value(series_key, y_vals[-1], progress)
+                tail_count = max(3, DISPLAY_TAIL_SEGMENTS)
+                tail_x_end = x_vals[-2] + (x_vals[-1] - x_vals[-2]) * progress
+                tail_x = np.linspace(x_vals[-2], tail_x_end, tail_count).tolist()
+                tail_y = np.linspace(y_vals[-2], animated_last, tail_count).tolist()
+                x_vals = x_vals[:-2] + tail_x
+                y_vals = y_vals[:-2] + tail_y
+                live_x_max = tail_x_end if live_x_max is None else max(live_x_max, tail_x_end)
+            elif is_datetime and len(x_vals) == 1:
+                animated_last = self._current_display_value(series_key, y_vals[-1])
+                y_vals[-1] = animated_last
+                live_x_max = x_vals[-1] if live_x_max is None else max(live_x_max, x_vals[-1])
 
             all_x.extend(x_vals)
             all_y.extend(y_vals)
@@ -387,22 +415,98 @@ class ConcentrationTab(QWidget):
                 symbolPen=pg.mkPen(color=color),
             )
 
-        self._apply_ranges(all_x, all_y)
+        self._apply_ranges(all_x, all_y, live_x_max)
 
     @staticmethod
-    def _series_uses_datetime(series: list[tuple[str, list[float], list[object], str]]) -> bool:
-        for _, _, times, _ in series:
+    def _series_uses_datetime(
+        series: list[tuple[str, list[float], list[object], str, tuple[str, str]]]
+    ) -> bool:
+        for _, _, times, _, _ in series:
             if times:
                 return isinstance(times[0], datetime)
         return False
 
-    def _time_origin(self, series: list[tuple[str, list[float], list[object], str]]) -> datetime | None:
+    def _time_origin(
+        self,
+        series: list[tuple[str, list[float], list[object], str, tuple[str, str]]],
+    ) -> datetime | None:
         first_times = []
-        for _, vals, times, _ in series:
+        for _, vals, times, _, _ in series:
             _, clipped_times = self._clip_for_display(vals, times)
             if clipped_times and isinstance(clipped_times[0], datetime):
                 first_times.append(clipped_times[0])
         return min(first_times) if first_times else None
+
+    def _update_display_animation(self, all_group_results: list, group_labels: list[str]) -> None:
+        if self._mode != "time":
+            self._display_animation.clear()
+            return
+
+        now = time.monotonic()
+        for glabel, gas_results in zip(group_labels, all_group_results):
+            for result in gas_results:
+                key = (glabel, result.name)
+                target = float(result.concentration * 100)
+                vals = self._history.get(glabel, {}).get(result.name, ([], []))[0]
+                previous = float(vals[-2]) if len(vals) >= 2 else target
+                start_value = self._current_display_value(key, previous)
+                self._display_animation[key] = {
+                    "from_y": start_value,
+                    "to_y": target,
+                    "start": now,
+                }
+
+    def _current_display_value(
+        self,
+        key: tuple[str, str],
+        default: float,
+        progress: float | None = None,
+    ) -> float:
+        animation = self._display_animation.get(key)
+        if not animation or self._mode != "time":
+            return default
+
+        progress = self._current_display_progress(key) if progress is None else progress
+        if progress >= 1.0:
+            return animation["to_y"]
+
+        eased = 1.0 - (1.0 - progress) ** 3
+        return animation["from_y"] + (animation["to_y"] - animation["from_y"]) * eased
+
+    def _current_display_progress(self, key: tuple[str, str]) -> float:
+        animation = self._display_animation.get(key)
+        if not animation or self._mode != "time":
+            return 1.0
+
+        elapsed = max(0.0, time.monotonic() - animation["start"])
+        if elapsed >= DISPLAY_ANIMATION_DURATION_S:
+            return 1.0
+        return elapsed / DISPLAY_ANIMATION_DURATION_S
+
+    @staticmethod
+    def _time_aligned_display_progress(times: list[object]) -> float:
+        if len(times) < 2:
+            return 1.0
+
+        prev_time = times[-2]
+        target_time = times[-1]
+        if not isinstance(prev_time, datetime) or not isinstance(target_time, datetime):
+            return 1.0
+
+        frame_seconds = max(0.001, (target_time - prev_time).total_seconds())
+        display_time = datetime.now().timestamp() - frame_seconds
+        progress = (display_time - prev_time.timestamp()) / frame_seconds
+        return max(0.0, min(1.0, progress))
+
+    def _has_active_animation(self) -> bool:
+        if self._mode != "time" or not self._display_animation:
+            return False
+
+        now = time.monotonic()
+        return any(
+            now - animation["start"] < DISPLAY_ANIMATION_DURATION_S
+            for animation in self._display_animation.values()
+        )
 
     @staticmethod
     def _x_values(times: list[object], is_datetime: bool,
@@ -432,11 +536,18 @@ class ConcentrationTab(QWidget):
             return list(out_vals), list(out_times)
         return vals[-WINDOW_SIZE:], times[-WINDOW_SIZE:]
 
-    def _apply_ranges(self, x_vals: list[float], y_vals: list[float]) -> None:
+    def _apply_ranges(
+        self,
+        x_vals: list[float],
+        y_vals: list[float],
+        live_x_max: float | None = None,
+    ) -> None:
         if not x_vals or not y_vals:
             return
         x_min = min(x_vals)
         x_max = max(x_vals)
+        if live_x_max is not None:
+            x_max = max(x_max, live_x_max)
         min_span = MIN_TIME_SPAN_SECONDS if self._mode == "time" else MIN_INDEX_SPAN
         if x_max <= x_min:
             x_max = x_min + min_span

@@ -256,6 +256,14 @@ class AcquisitionTab(QWidget):
         gbt_layout.addWidget(self._tel_label)
         right.addWidget(gb_tel)
 
+        gb_diag = QGroupBox("诊断 / Diagnostics")
+        self._diag_label = QLabel("等待采集或载入图像 / Waiting for frame")
+        self._diag_label.setWordWrap(True)
+        self._diag_label.setStyleSheet("font-family: Consolas, monospace;")
+        diag_layout = QVBoxLayout(gb_diag)
+        diag_layout.addWidget(self._diag_label)
+        right.addWidget(gb_diag)
+
         right.addStretch()
 
         layout.addLayout(left, 3)
@@ -303,6 +311,18 @@ class AcquisitionTab(QWidget):
             f"风扇: {gear_name}"
         )
         self._tel_label.setText(text)
+
+    def update_diagnostics(self, diagnostics: dict) -> None:
+        lines = [
+            f"连接: {diagnostics.get('connection', '--')}",
+            f"帧数: {diagnostics.get('frame_count', 0)}",
+            f"帧间隔: {diagnostics.get('frame_interval_ms', '--')} ms",
+            f"图像: {diagnostics.get('shape', '--')} {diagnostics.get('dtype', '')}",
+            f"像素: min={diagnostics.get('min', '--')} max={diagnostics.get('max', '--')} mean={diagnostics.get('mean', '--')}",
+            f"处理: {diagnostics.get('processing_ms', '--')} ms  avg={diagnostics.get('processing_avg_ms', '--')} ms",
+            f"队列: busy={diagnostics.get('processing_busy', False)} pending={diagnostics.get('pending_frame', False)} dropped={diagnostics.get('dropped_frames', 0)}",
+        ]
+        self._diag_label.setText("\n".join(lines))
 
     def display_frame(self, arr: np.ndarray) -> None:
         h, w = arr.shape

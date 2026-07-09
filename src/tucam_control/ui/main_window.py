@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -144,6 +145,25 @@ class MainWindow(QMainWindow):
         self._pending_frame: np.ndarray | None = None
         self._processing_task: _ProcessingTask | None = None
         self._processing_generation = 0
+        self._frame_count = 0
+        self._last_frame_perf: float | None = None
+        self._processing_durations_ms: deque[float] = deque(maxlen=30)
+        self._dropped_pending_frames = 0
+        self._diagnostics: dict = {
+            "connection": "未连接 / Disconnected",
+            "frame_count": 0,
+            "frame_interval_ms": "--",
+            "shape": "--",
+            "dtype": "",
+            "min": "--",
+            "max": "--",
+            "mean": "--",
+            "processing_ms": "--",
+            "processing_avg_ms": "--",
+            "processing_busy": False,
+            "pending_frame": False,
+            "dropped_frames": 0,
+        }
         self._processing_pool = QThreadPool(self)
         self._processing_pool.setMaxThreadCount(1)
 
@@ -215,6 +235,7 @@ class MainWindow(QMainWindow):
             if count == 0:
                 log.warning("No camera detected after TUCAM_Api_Init")
                 self.status_changed.emit("未检测到相机 / No camera detected")
+                self._update_diagnostics(connection="未检测到相机 / No camera detected")
                 QMessageBox.warning(
                     self,
                     "相机未连接 / Camera Not Found",
@@ -246,6 +267,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.status_changed.emit(f"已连接 / Connected: {info.model}")
+            self._update_diagnostics(connection=f"已连接 / Connected: {info.model or '--'}")
             self._was_connected = True
             self._disconnect_warned = False
         except Exception as exc:
@@ -259,6 +281,7 @@ class MainWindow(QMainWindow):
                 "也可以点击「载入TIF」使用测试图片。",
             )
             self._settings_tab.update_device_status(None)
+            self._update_diagnostics(connection=f"连接失败 / Failed: {exc}")
             self._was_connected = False
 
     def _apply_current_settings(self) -> None:
@@ -287,6 +310,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_reconnect(self) -> None:
         log.info("Reconnect requested")
+        self._update_diagnostics(connection="正在重新连接 / Reconnecting")
         self._capture_timer.stop()
         if self._camera.is_capturing:
             try:
@@ -589,6 +613,7 @@ class MainWindow(QMainWindow):
         self._capture_timer.stop()
         self._acq_tab.set_capturing_state(False)
         self._settings_tab.update_device_status(None)
+        self._update_diagnostics(connection="已断开 / Disconnected")
         try:
             self._camera.stop_capture()
         except Exception as exc:
@@ -698,15 +723,38 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, arr: np.ndarray) -> None:
         self._last_frame = arr.copy()
+        now = time.perf_counter()
+        interval_ms = None
+        if self._last_frame_perf is not None:
+            interval_ms = (now - self._last_frame_perf) * 1000
+        self._last_frame_perf = now
+        self._frame_count += 1
+        self._update_diagnostics(
+            frame_count=self._frame_count,
+            frame_interval_ms=f"{interval_ms:.0f}" if interval_ms is not None else "--",
+            shape=f"{arr.shape[0]}x{arr.shape[1]}",
+            dtype=str(arr.dtype),
+            min=int(arr.min()) if arr.size else "--",
+            max=int(arr.max()) if arr.size else "--",
+            mean=f"{float(arr.mean()):.2f}" if arr.size else "--",
+        )
         self._queue_frame_processing(arr)
 
     def _queue_frame_processing(self, arr: np.ndarray) -> None:
         if self._processing_busy:
+            if self._pending_frame is not None:
+                self._dropped_pending_frames += 1
             self._pending_frame = arr.copy()
+            self._update_diagnostics(
+                processing_busy=True,
+                pending_frame=True,
+                dropped_frames=self._dropped_pending_frames,
+            )
             return
 
         self._processing_busy = True
         self._pending_frame = None
+        self._update_diagnostics(processing_busy=True, pending_frame=False)
         task = _ProcessingTask(
             frame=arr.copy(),
             settings=copy.deepcopy(self._settings),
@@ -723,6 +771,15 @@ class MainWindow(QMainWindow):
     def _on_processing_finished(self, payload: dict) -> None:
         self._processing_busy = False
         self._processing_task = None
+        duration_ms = float(payload.get("duration_ms", 0.0))
+        self._processing_durations_ms.append(duration_ms)
+        avg_ms = sum(self._processing_durations_ms) / len(self._processing_durations_ms)
+        self._update_diagnostics(
+            processing_ms=f"{duration_ms:.0f}",
+            processing_avg_ms=f"{avg_ms:.0f}",
+            processing_busy=False,
+            pending_frame=self._pending_frame is not None,
+        )
         if payload.get("generation") == self._processing_generation:
             self._data_tab.set_row_labels(payload["labels"])
             self._data_tab.display_array(payload["result"])
@@ -771,6 +828,7 @@ class MainWindow(QMainWindow):
         self._processing_busy = False
         self._processing_task = None
         log.warning("Processing failed: %s", message)
+        self._update_diagnostics(processing_busy=False, pending_frame=self._pending_frame is not None)
         QMessageBox.warning(
             self,
             "处理错误 / Processing Error",
@@ -780,10 +838,16 @@ class MainWindow(QMainWindow):
 
     def _start_pending_processing(self) -> None:
         if self._pending_frame is None:
+            self._update_diagnostics(processing_busy=False, pending_frame=False)
             return
         frame = self._pending_frame
         self._pending_frame = None
         self._queue_frame_processing(frame)
+
+    def _update_diagnostics(self, **updates) -> None:
+        self._diagnostics.update(updates)
+        if hasattr(self, "_acq_tab"):
+            self._acq_tab.update_diagnostics(self._diagnostics)
 
     @Slot(object)
     def _on_calibration_changed(self, coeffs: np.ndarray | None) -> None:
