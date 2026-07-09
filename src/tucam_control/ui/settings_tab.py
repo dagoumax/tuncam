@@ -116,6 +116,13 @@ class SettingsTab(QWidget):
         self._smooth_combo.setCurrentIndex(2)
         proc_form.addRow("浓度平滑 / Concentration Smoothing:", self._smooth_combo)
 
+        self._batch_interval_spin = QSpinBox()
+        self._batch_interval_spin.setRange(100, 60000)
+        self._batch_interval_spin.setSingleStep(100)
+        self._batch_interval_spin.setValue(1000)
+        self._batch_interval_spin.setSuffix(" ms")
+        proc_form.addRow("批量测试间隔 / Batch Interval:", self._batch_interval_spin)
+
         layout.addWidget(proc_gb)
 
         # ---- arPLS baseline correction ----
@@ -330,6 +337,7 @@ class SettingsTab(QWidget):
             "save_dir": self._save_dir_edit.text().strip(),
             "row_groups_text": raw_text,
             "merge_factor": self._merge_spin.value(),
+            "batch_interval_ms": self._batch_interval_spin.value(),
             "concentration_smoothing": self._smooth_combo.currentData(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),
             "arpls_mode": self._arpls_mode_combo.currentData(),

@@ -137,6 +137,7 @@ class MainWindow(QMainWindow):
             "arpls_max_iter": 50,
             "arpls_tol": 1e-6,
             "concentration_smoothing": "balanced",
+            "batch_interval_ms": 1000,
         }
         self._was_connected = False
         self._disconnect_warned = False
@@ -163,6 +164,14 @@ class MainWindow(QMainWindow):
             "processing_busy": False,
             "pending_frame": False,
             "dropped_frames": 0,
+            "exposure_readback_ms": "--",
+            "temperature_readback_c": "--",
+            "fan_readback": "--",
+            "data_format": "--",
+            "bit_depth": "--",
+            "working_mode": "--",
+            "batch_interval_ms": 1000,
+            "errors": [],
         }
         self._processing_pool = QThreadPool(self)
         self._processing_pool.setMaxThreadCount(1)
@@ -181,7 +190,7 @@ class MainWindow(QMainWindow):
         self._batch_images: list[tuple[str, np.ndarray]] = []
         self._batch_idx: int = 0
         self._batch_timer = QTimer(self)
-        self._batch_timer.setInterval(200)
+        self._batch_timer.setInterval(self._settings["batch_interval_ms"])
         self._batch_timer.timeout.connect(self._on_batch_tick)
 
         QTimer.singleShot(0, self._try_connect)
@@ -235,6 +244,7 @@ class MainWindow(QMainWindow):
             if count == 0:
                 log.warning("No camera detected after TUCAM_Api_Init")
                 self.status_changed.emit("未检测到相机 / No camera detected")
+                self._set_diagnostic_error("connection", "未检测到相机")
                 self._update_diagnostics(connection="未检测到相机 / No camera detected")
                 QMessageBox.warning(
                     self,
@@ -267,6 +277,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.status_changed.emit(f"已连接 / Connected: {info.model}")
+            self._clear_diagnostic_error("connection")
             self._update_diagnostics(connection=f"已连接 / Connected: {info.model or '--'}")
             self._was_connected = True
             self._disconnect_warned = False
@@ -281,31 +292,70 @@ class MainWindow(QMainWindow):
                 "也可以点击「载入TIF」使用测试图片。",
             )
             self._settings_tab.update_device_status(None)
+            self._set_diagnostic_error("connection", f"连接失败: {exc}")
             self._update_diagnostics(connection=f"连接失败 / Failed: {exc}")
             self._was_connected = False
 
     def _apply_current_settings(self) -> None:
         s = self._settings
+        errors: list[str] = []
         try:
             self._camera.configure_scientific_frame_format()
         except Exception as exc:
             log.warning("Failed to configure scientific frame format: %s", exc)
+            errors.append(f"格式设置失败: {exc}")
         try:
             self._camera.set_exposure_time(s["exposure_time_ms"])
         except Exception as exc:
             log.warning("Failed to apply exposure_time_ms=%s: %s", s.get("exposure_time_ms"), exc)
+            errors.append(f"曝光设置失败: {exc}")
         try:
             self._camera.set_temperature_target(s["temperature_c"])
         except Exception as exc:
             log.warning("Failed to apply temperature_c=%s: %s", s.get("temperature_c"), exc)
+            errors.append(f"温度设置失败: {exc}")
         try:
             self._camera.set_fan_gear(s["fan_gear"])
         except Exception as exc:
             log.warning("Failed to apply fan_gear=%s: %s", s.get("fan_gear"), exc)
+            errors.append(f"风扇设置失败: {exc}")
         try:
             self._camera.set_working_mode(s.get("working_mode", 0))
         except Exception as exc:
             log.warning("Failed to apply working_mode=%s: %s", s.get("working_mode", 0), exc)
+            errors.append(f"模式设置失败: {exc}")
+        if errors:
+            self._set_diagnostic_error("settings", "；".join(errors))
+        else:
+            self._clear_diagnostic_error("settings")
+        self._refresh_camera_readbacks()
+
+    def _refresh_camera_readbacks(self) -> None:
+        if not self._camera.is_open:
+            return
+
+        readback_errors: list[str] = []
+
+        def _read(label: str, reader, formatter=str) -> str:
+            try:
+                return formatter(reader())
+            except Exception as exc:
+                log.debug("Readback %s failed: %s", label, exc)
+                readback_errors.append(f"{label}: {exc}")
+                return "N/A"
+
+        self._update_diagnostics(
+            exposure_readback_ms=_read("exposure", self._camera.get_exposure_time, lambda v: f"{v:.1f}"),
+            temperature_readback_c=_read("temperature target", self._camera.get_temperature_target, lambda v: f"{v:.1f}"),
+            fan_readback=_read("fan gear", self._camera.get_fan_gear),
+            data_format=_read("data format", self._camera.get_data_format),
+            bit_depth=_read("bit depth", self._camera.get_bit_depth),
+            working_mode=_read("working mode", self._camera.get_working_mode),
+        )
+        if readback_errors:
+            self._set_diagnostic_error("readback", "读回失败: " + "；".join(readback_errors))
+        else:
+            self._clear_diagnostic_error("readback")
 
     @Slot()
     def _on_reconnect(self) -> None:
@@ -401,11 +451,14 @@ class MainWindow(QMainWindow):
         self._batch_idx = 0
         self._conc_tab.clear_history()
         self._acq_tab.set_batch_state(True)
+        self._batch_timer.setInterval(self._settings.get("batch_interval_ms", 1000))
+        self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
         self._batch_timer.start()
         log.info(
-            "Batch test started: usable_images=%s total_tif_files=%s folder=%s",
+            "Batch test started: usable_images=%s total_tif_files=%s interval_ms=%s folder=%s",
             len(self._batch_images),
             len(tif_files),
+            self._batch_timer.interval(),
             folder,
         )
         self.status_changed.emit(f"批量测试: {len(self._batch_images)} 张图像")
@@ -521,10 +574,12 @@ class MainWindow(QMainWindow):
             self._camera.start_capture()
             self._acq_tab.set_capturing_state(True)
             self._capture_timer.start()
+            self._clear_diagnostic_error("capture")
             log.info("Continuous capture timer started interval_ms=%s", self._capture_timer.interval())
             self.status_changed.emit("连续采集中 / Continuous capture running")
         except Exception as exc:
             log.exception("Continuous capture start failed")
+            self._set_diagnostic_error("capture", f"启动采集失败: {exc}")
             QMessageBox.critical(
                 self,
                 "启动采集失败 / Capture Start Failed",
@@ -577,6 +632,7 @@ class MainWindow(QMainWindow):
             return
         arr = self._camera.wait_for_frame(timeout_ms=CAPTURE_POLL_TIMEOUT_MS)
         if arr is not None:
+            self._clear_diagnostic_error("capture")
             log.debug("Continuous frame received: shape=%s dtype=%s", arr.shape, arr.dtype)
             self._acq_tab.display_frame(arr)
             self._auto_save_frame()
@@ -596,6 +652,7 @@ class MainWindow(QMainWindow):
             info = self._camera.get_device_info()
             self._acq_tab.update_telemetry(info)
             self._settings_tab.update_device_status(info)
+            self._refresh_camera_readbacks()
         except Exception as exc:
             log.warning("Telemetry refresh failed: %s", exc)
             self.status_changed.emit(f"设备信息刷新失败 / Telemetry unavailable: {exc}")
@@ -614,6 +671,7 @@ class MainWindow(QMainWindow):
         self._acq_tab.set_capturing_state(False)
         self._settings_tab.update_device_status(None)
         self._update_diagnostics(connection="已断开 / Disconnected")
+        self._set_diagnostic_error("connection", "设备连接已断开")
         try:
             self._camera.stop_capture()
         except Exception as exc:
@@ -680,6 +738,8 @@ class MainWindow(QMainWindow):
         old_smoothing = self._settings.get("concentration_smoothing", "balanced")
 
         self._settings.update(updates)
+        self._batch_timer.setInterval(self._settings.get("batch_interval_ms", 1000))
+        self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
         self._processing_generation += 1
         if self._camera.is_open:
             self._apply_current_settings()
@@ -738,6 +798,12 @@ class MainWindow(QMainWindow):
             max=int(arr.max()) if arr.size else "--",
             mean=f"{float(arr.mean()):.2f}" if arr.size else "--",
         )
+        if arr.size and int(arr.max()) == 0:
+            self._set_diagnostic_error("frame", "图像为纯黑: max=0，请检查曝光、触发、光路或数据格式")
+        elif arr.size and float(arr.mean()) < 1.0:
+            self._set_diagnostic_error("frame", f"图像信号很低: mean={float(arr.mean()):.2f}")
+        else:
+            self._clear_diagnostic_error("frame")
         self._queue_frame_processing(arr)
 
     def _queue_frame_processing(self, arr: np.ndarray) -> None:
@@ -745,6 +811,7 @@ class MainWindow(QMainWindow):
             if self._pending_frame is not None:
                 self._dropped_pending_frames += 1
             self._pending_frame = arr.copy()
+            self._set_diagnostic_error("queue", "后台处理忙，已覆盖旧的待处理帧")
             self._update_diagnostics(
                 processing_busy=True,
                 pending_frame=True,
@@ -781,6 +848,7 @@ class MainWindow(QMainWindow):
             pending_frame=self._pending_frame is not None,
         )
         if payload.get("generation") == self._processing_generation:
+            self._clear_diagnostic_error("processing")
             self._data_tab.set_row_labels(payload["labels"])
             self._data_tab.display_array(payload["result"])
             self._data_tab.set_baseline_data(payload["baseline"])
@@ -828,6 +896,7 @@ class MainWindow(QMainWindow):
         self._processing_busy = False
         self._processing_task = None
         log.warning("Processing failed: %s", message)
+        self._set_diagnostic_error("processing", f"处理失败: {message}")
         self._update_diagnostics(processing_busy=False, pending_frame=self._pending_frame is not None)
         QMessageBox.warning(
             self,
@@ -838,6 +907,7 @@ class MainWindow(QMainWindow):
 
     def _start_pending_processing(self) -> None:
         if self._pending_frame is None:
+            self._clear_diagnostic_error("queue")
             self._update_diagnostics(processing_busy=False, pending_frame=False)
             return
         frame = self._pending_frame
@@ -846,6 +916,24 @@ class MainWindow(QMainWindow):
 
     def _update_diagnostics(self, **updates) -> None:
         self._diagnostics.update(updates)
+        if hasattr(self, "_acq_tab"):
+            self._acq_tab.update_diagnostics(self._diagnostics)
+
+    def _set_diagnostic_error(self, key: str, message: str) -> None:
+        errors_by_key = dict(self._diagnostics.get("_errors_by_key", {}))
+        errors_by_key[key] = message
+        self._diagnostics["_errors_by_key"] = errors_by_key
+        self._diagnostics["errors"] = list(errors_by_key.values())
+        if hasattr(self, "_acq_tab"):
+            self._acq_tab.update_diagnostics(self._diagnostics)
+
+    def _clear_diagnostic_error(self, key: str) -> None:
+        errors_by_key = dict(self._diagnostics.get("_errors_by_key", {}))
+        if key not in errors_by_key:
+            return
+        del errors_by_key[key]
+        self._diagnostics["_errors_by_key"] = errors_by_key
+        self._diagnostics["errors"] = list(errors_by_key.values())
         if hasattr(self, "_acq_tab"):
             self._acq_tab.update_diagnostics(self._diagnostics)
 

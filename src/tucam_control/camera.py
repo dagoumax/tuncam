@@ -344,9 +344,10 @@ class CameraController:
         """Get current exposure time in milliseconds."""
         self._check_open()
         val = c_double(0)
-        TUCAM_Prop_GetValue(
+        result = TUCAM_Prop_GetValue(
             self._hcam, TUCAM_IDPROP.TUIDP_EXPOSURETM.value, byref(val), 0
         )
+        log.debug("TUCAM_Prop_GetValue(EXPOSURETM) returned %s; value=%s", describe_tucam_ret(result), val.value)
         return val.value
 
     def get_exposure_range(self) -> tuple[float, float]:
@@ -376,8 +377,13 @@ class CameraController:
         """Get current target temperature in Celsius."""
         self._check_open()
         val = c_double(0)
-        TUCAM_Prop_GetValue(
+        result = TUCAM_Prop_GetValue(
             self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value, byref(val), 0
+        )
+        log.debug(
+            "TUCAM_Prop_GetValue(TEMPERATURE_TARGET) returned %s; value=%s",
+            describe_tucam_ret(result),
+            val.value,
         )
         return val.value
 
@@ -431,6 +437,30 @@ class CameraController:
         log.debug("TUCAM_Capa_GetValue(FAN_GEAR) returned %s; value=%s", describe_tucam_ret(result), val.value)
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
             raise RuntimeError(f"Get fan gear failed: {describe_tucam_ret(result)}")
+        return val.value
+
+    def get_data_format(self) -> int:
+        """Get current frame data format capability value."""
+        self._check_open()
+        val = c_int32(0)
+        result = TUCAM_Capa_GetValue(
+            self._hcam, TUCAM_IDCAPA.TUIDC_DATAFORMAT.value, byref(val)
+        )
+        log.debug("TUCAM_Capa_GetValue(DATAFORMAT) returned %s; value=%s", describe_tucam_ret(result), val.value)
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get data format failed: {describe_tucam_ret(result)}")
+        return val.value
+
+    def get_bit_depth(self) -> int:
+        """Get current bit-depth capability value."""
+        self._check_open()
+        val = c_int32(0)
+        result = TUCAM_Capa_GetValue(
+            self._hcam, TUCAM_IDCAPA.TUIDC_BITOFDEPTH.value, byref(val)
+        )
+        log.debug("TUCAM_Capa_GetValue(BITOFDEPTH) returned %s; value=%s", describe_tucam_ret(result), val.value)
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get bit depth failed: {describe_tucam_ret(result)}")
         return val.value
 
     # ------------------------------------------------------------------

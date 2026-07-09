@@ -313,8 +313,12 @@ class AcquisitionTab(QWidget):
         self._tel_label.setText(text)
 
     def update_diagnostics(self, diagnostics: dict) -> None:
+        errors = diagnostics.get("errors", [])
         lines = [
             f"连接: {diagnostics.get('connection', '--')}",
+            f"设置读回: exp={diagnostics.get('exposure_readback_ms', '--')} ms temp={diagnostics.get('temperature_readback_c', '--')} °C fan={diagnostics.get('fan_readback', '--')}",
+            f"格式读回: format={diagnostics.get('data_format', '--')} bit={diagnostics.get('bit_depth', '--')} mode={diagnostics.get('working_mode', '--')}",
+            f"批量间隔: {diagnostics.get('batch_interval_ms', '--')} ms",
             f"帧数: {diagnostics.get('frame_count', 0)}",
             f"帧间隔: {diagnostics.get('frame_interval_ms', '--')} ms",
             f"图像: {diagnostics.get('shape', '--')} {diagnostics.get('dtype', '')}",
@@ -322,6 +326,9 @@ class AcquisitionTab(QWidget):
             f"处理: {diagnostics.get('processing_ms', '--')} ms  avg={diagnostics.get('processing_avg_ms', '--')} ms",
             f"队列: busy={diagnostics.get('processing_busy', False)} pending={diagnostics.get('pending_frame', False)} dropped={diagnostics.get('dropped_frames', 0)}",
         ]
+        if errors:
+            lines.append("最近问题:")
+            lines.extend(f"- {item}" for item in errors[-5:])
         self._diag_label.setText("\n".join(lines))
 
     def display_frame(self, arr: np.ndarray) -> None:
