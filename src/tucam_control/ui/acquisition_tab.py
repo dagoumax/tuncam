@@ -303,31 +303,42 @@ class AcquisitionTab(QWidget):
         self._info_text.setPlainText("\n".join(lines))
 
     def update_telemetry(self, info: CameraInfo) -> None:
-        gear_name = _GEAR_LABELS.get(info.fan_speed, f"{info.fan_speed}")
-        text = (
-            f"FPGA 温度: {info.fpga_temperature:.1f} °C  |  "
-            f"PCBA 温度: {info.pcba_temperature:.1f} °C  |  "
-            f"环境温度: {info.env_temperature:.1f} °C\n"
-            f"风扇: {gear_name}"
-        )
-        self._tel_label.setText(text)
+        temp_parts = []
+        if abs(info.fpga_temperature) > 0.01:
+            temp_parts.append(f"FPGA {info.fpga_temperature:.1f} °C")
+        if abs(info.pcba_temperature) > 0.01:
+            temp_parts.append(f"PCBA {info.pcba_temperature:.1f} °C")
+        if abs(info.env_temperature) > 0.01:
+            temp_parts.append(f"环境 {info.env_temperature:.1f} °C")
+
+        lines = ["温度: " + "  |  ".join(temp_parts) if temp_parts else "温度: --"]
+        if info.fan_speed in _GEAR_LABELS:
+            lines.append(f"风扇: {_GEAR_LABELS[info.fan_speed]}")
+        else:
+            lines.append("风扇: --")
+        self._tel_label.setText("\n".join(lines))
 
     def update_diagnostics(self, diagnostics: dict) -> None:
         errors = diagnostics.get("errors", [])
+        temp_readback = diagnostics.get("temperature_readback_c", "--")
+        try:
+            if float(temp_readback) < -100.0 or float(temp_readback) > 100.0:
+                temp_readback = "--"
+        except (TypeError, ValueError):
+            pass
         lines = [
             f"连接: {diagnostics.get('connection', '--')}",
-            f"设置读回: exp={diagnostics.get('exposure_readback_ms', '--')} ms temp={diagnostics.get('temperature_readback_c', '--')} °C fan={diagnostics.get('fan_readback', '--')}",
-            f"格式读回: format={diagnostics.get('data_format', '--')} bit={diagnostics.get('bit_depth', '--')} mode={diagnostics.get('working_mode', '--')}",
-            f"批量间隔: {diagnostics.get('batch_interval_ms', '--')} ms",
-            f"帧数: {diagnostics.get('frame_count', 0)}",
-            f"帧间隔: {diagnostics.get('frame_interval_ms', '--')} ms",
+            f"相机读回: 曝光 {diagnostics.get('exposure_readback_ms', '--')} ms  温度 {temp_readback} °C  风扇 {diagnostics.get('fan_readback', '--')}",
+            f"采集: 帧数 {diagnostics.get('frame_count', 0)}  间隔 {diagnostics.get('frame_interval_ms', '--')} ms",
             f"图像: {diagnostics.get('shape', '--')} {diagnostics.get('dtype', '')}",
             f"像素: min={diagnostics.get('min', '--')} max={diagnostics.get('max', '--')} mean={diagnostics.get('mean', '--')}",
-            f"处理: {diagnostics.get('processing_ms', '--')} ms  avg={diagnostics.get('processing_avg_ms', '--')} ms",
-            f"队列: busy={diagnostics.get('processing_busy', False)} pending={diagnostics.get('pending_frame', False)} dropped={diagnostics.get('dropped_frames', 0)}",
+            f"处理: {diagnostics.get('processing_ms', '--')} ms  平均 {diagnostics.get('processing_avg_ms', '--')} ms",
         ]
+        dropped = diagnostics.get("dropped_frames", 0)
+        if dropped:
+            lines.append(f"丢帧: {dropped}")
         if errors:
-            lines.append("最近问题:")
+            lines.append("最近问题")
             lines.extend(f"- {item}" for item in errors[-5:])
         self._diag_label.setText("\n".join(lines))
 

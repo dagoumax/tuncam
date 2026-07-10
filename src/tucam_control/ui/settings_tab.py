@@ -65,6 +65,7 @@ class SettingsTab(QWidget):
         self._temp_spin.setSuffix(" °C")
         self._temp_spin.setValue(-10.0)
         self._temp_spin.setSingleStep(1)
+        self._temp_spin.setKeyboardTracking(False)
         cam_form.addRow("目标温度 / Target Temperature:", self._temp_spin)
 
         self._fan_combo = QComboBox()
@@ -282,11 +283,14 @@ class SettingsTab(QWidget):
             self._status_connect.setText("已连接 / Connected")
             self._status_connect.setStyleSheet("color: green;")
             self._status_name.setText(info.model or "--")
-            self._status_temp.setText(
-                f"FPGA {info.fpga_temperature:.1f} °C  |  "
-                f"PCB {info.pcba_temperature:.1f} °C  |  "
-                f"环境 {info.env_temperature:.1f} °C"
-            )
+            temp_parts = []
+            if abs(info.fpga_temperature) > 0.01:
+                temp_parts.append(f"FPGA {info.fpga_temperature:.1f} °C")
+            if abs(info.pcba_temperature) > 0.01:
+                temp_parts.append(f"PCB {info.pcba_temperature:.1f} °C")
+            if abs(info.env_temperature) > 0.01:
+                temp_parts.append(f"环境 {info.env_temperature:.1f} °C")
+            self._status_temp.setText("  |  ".join(temp_parts) if temp_parts else "N/A")
 
     def update_ranges(self, camera: CameraController) -> None:
         try:
@@ -297,10 +301,15 @@ class SettingsTab(QWidget):
             self._exp_range_label.setText("N/A")
         try:
             mn, mx = camera.get_temperature_range()
-            self._temp_range_label.setText(f"{mn:.1f} – {mx:.1f} °C")
-            self._temp_spin.setRange(mn, mx)
+            if mn < mx and -150.0 <= mn <= 150.0 and -150.0 <= mx <= 150.0:
+                self._temp_range_label.setText(f"{mn:.1f} – {mx:.1f} °C")
+                self._temp_spin.setRange(mn, mx)
+            else:
+                self._temp_range_label.setText(f"忽略异常范围: {mn:.1f} – {mx:.1f} °C")
+                self._temp_spin.setRange(-50, 50)
         except Exception:
             self._temp_range_label.setText("N/A")
+            self._temp_spin.setRange(-50, 50)
 
     @Slot()
     def _on_apply(self) -> None:
@@ -328,13 +337,17 @@ class SettingsTab(QWidget):
             )
             return
 
+        save_dir = self._save_dir_edit.text().strip() or DEFAULT_SAVE_DIR
+        if save_dir != self._save_dir_edit.text():
+            self._save_dir_edit.setText(save_dir)
+
         updates = {
             "exposure_time_ms": self._exp_spin.value(),
             "temperature_c": self._temp_spin.value(),
             "fan_gear": self._fan_combo.currentData(),
             "working_mode": self._mode_combo.currentData(),
             "auto_save": self._auto_save_cb.isChecked(),
-            "save_dir": self._save_dir_edit.text().strip(),
+            "save_dir": save_dir,
             "row_groups_text": raw_text,
             "merge_factor": self._merge_spin.value(),
             "batch_interval_ms": self._batch_interval_spin.value(),

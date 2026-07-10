@@ -34,6 +34,22 @@ DISPLAY_ANIMATION_INTERVAL_MS = 33
 DISPLAY_TAIL_SEGMENTS = 10
 
 
+class LocalTimeAxis(pg.AxisItem):
+    """Bottom axis that shows local clock time for timestamp values."""
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802 - Qt override name
+        labels = []
+        for value in values:
+            try:
+                if value > 946684800:
+                    labels.append(datetime.fromtimestamp(value).strftime("%H:%M:%S"))
+                else:
+                    labels.append(f"{value:g}")
+            except Exception:
+                labels.append("")
+        return labels
+
+
 class ConcentrationTab(QWidget):
     """Fourth tab: current concentrations table + trend chart (multi-group)."""
 
@@ -127,12 +143,12 @@ class ConcentrationTab(QWidget):
         # -- Right: trend chart --
         right = QVBoxLayout()
         pg.setConfigOptions(antialias=True)
-        self._plot_widget = pg.PlotWidget()
+        self._plot_widget = pg.PlotWidget(axisItems={"bottom": LocalTimeAxis(orientation="bottom")})
         self._plot_widget.setBackground("w")
         self._plot_item = self._plot_widget.getPlotItem()
         self._plot_item.showGrid(x=True, y=True, alpha=0.25)
         self._plot_item.setLabel("left", "浓度 / Concentration (%)")
-        self._plot_item.setLabel("bottom", "时间 / Time (s)")
+        self._plot_item.setLabel("bottom", "本地时间 / Local Time")
         self._legend = self._plot_item.addLegend(offset=(-12, 12))
         right.addWidget(self._plot_widget, 1)
 
@@ -330,7 +346,7 @@ class ConcentrationTab(QWidget):
         self._plot_item.setTitle(title)
         self._plot_item.setLabel(
             "bottom",
-            "时间 / Time (s)" if is_datetime else "帧序号 / Frame Index",
+            "本地时间 / Local Time" if is_datetime else "帧序号 / Frame Index",
         )
         self._draw_series(series, is_datetime)
 
@@ -371,7 +387,7 @@ class ConcentrationTab(QWidget):
         if not series:
             return
 
-        time_origin = self._time_origin(series) if is_datetime else None
+        time_origin = None
         all_x: list[float] = []
         all_y: list[float] = []
         show_legend = len(series) <= 24
@@ -511,9 +527,9 @@ class ConcentrationTab(QWidget):
     @staticmethod
     def _x_values(times: list[object], is_datetime: bool,
                   origin: datetime | None) -> list[float]:
-        if is_datetime and origin is not None:
+        if is_datetime:
             return [
-                float((t - origin).total_seconds()) if isinstance(t, datetime) else float(t)
+                float(t.timestamp()) if isinstance(t, datetime) else float(t)
                 for t in times
             ]
         return [float(t) for t in times]

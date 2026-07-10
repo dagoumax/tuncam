@@ -367,18 +367,41 @@ class CameraController:
         return (attr.dbValMin, attr.dbValMax)
 
     # ------------------------------------------------------------------
-    # Temperature  (TUIDP_TEMPERATURE_TARGET / TUIDC_ENABLETEC)
+    # Temperature  (TUIDP_TEMPERATURE / TUIDC_ENABLETEC)
     # ------------------------------------------------------------------
+
+    def _temperature_attr(self) -> TUCAM_PROP_ATTR:
+        attr = TUCAM_PROP_ATTR()
+        attr.idProp = TUCAM_IDPROP.TUIDP_TEMPERATURE.value
+        attr.nIdxChn = 0
+        result = TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
+        log.debug(
+            "Temperature attr returned %s; min=%s max=%s default=%s step=%s",
+            describe_tucam_ret(result),
+            attr.dbValMin,
+            attr.dbValMax,
+            attr.dbValDft,
+            attr.dbValStep,
+        )
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get temperature range failed: {describe_tucam_ret(result)}")
+        return attr
 
     def set_temperature_target(self, temp_c: float) -> None:
         """Set target temperature in Celsius. Enables TEC automatically."""
         self._check_open()
         result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_ENABLETEC.value, 1)
         log.debug("TUCAM_Capa_SetValue(ENABLETEC=1) returned %s", describe_tucam_ret(result))
+        sdk_value = temp_c
         result = TUCAM_Prop_SetValue(
-            self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value, c_double(temp_c), 0
+            self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE.value, c_double(sdk_value), 0
         )
-        log.info("Set temperature %.3f C returned %s", temp_c, describe_tucam_ret(result))
+        log.info(
+            "Set temperature %.3f C (sdk_value=%.3f) returned %s",
+            temp_c,
+            sdk_value,
+            describe_tucam_ret(result),
+        )
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
             raise RuntimeError(f"Set temperature target failed: {describe_tucam_ret(result)}")
 
@@ -387,10 +410,10 @@ class CameraController:
         self._check_open()
         val = c_double(0)
         result = TUCAM_Prop_GetValue(
-            self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value, byref(val), 0
+            self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE.value, byref(val), 0
         )
         log.debug(
-            "TUCAM_Prop_GetValue(TEMPERATURE_TARGET) returned %s; value=%s",
+            "TUCAM_Prop_GetValue(TEMPERATURE) returned %s; value_c=%s",
             describe_tucam_ret(result),
             val.value,
         )
@@ -401,12 +424,9 @@ class CameraController:
     def get_temperature_range(self) -> tuple[float, float]:
         """Get min/max temperature target range."""
         self._check_open()
-        attr = TUCAM_PROP_ATTR()
-        attr.idProp = TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value
-        attr.nIdxChn = 0
-        result = TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
-        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Get temperature range failed: {describe_tucam_ret(result)}")
+        attr = self._temperature_attr()
+        if attr.dbValMin >= 0.0 and attr.dbValMax >= 100.0:
+            return (-50.0, 50.0)
         return (attr.dbValMin, attr.dbValMax)
 
     # ------------------------------------------------------------------
@@ -513,9 +533,15 @@ class CameraController:
         """Allocate frame buffer. Must be called before capture start."""
         self._frame = TUCAM_FRAME()
         self._frame.pBuffer = 0
+        self._frame.ucFormatGet = TUFRM_FORMATS.TUFRM_FMT_USUAl.value
         self._frame.uiRsdSize = 1
         result = TUCAM_Buf_Alloc(self._hcam, pointer(self._frame))
-        log.info("TUCAM_Buf_Alloc returned %s", describe_tucam_ret(result))
+        log.info(
+            "TUCAM_Buf_Alloc returned %s; requested_format=%s actual_format_get=%s",
+            describe_tucam_ret(result),
+            TUFRM_FORMATS.TUFRM_FMT_USUAl.name,
+            self._frame.ucFormatGet,
+        )
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
             raise RuntimeError(f"Buffer alloc failed: {describe_tucam_ret(result)}")
 

@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
         self._last_frame_perf: float | None = None
         self._processing_durations_ms: deque[float] = deque(maxlen=30)
         self._dropped_pending_frames = 0
+        self._auto_save_error_reported = False
         self._diagnostics: dict = {
             "connection": "未连接 / Disconnected",
             "frame_count": 0,
@@ -499,29 +500,75 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _ensure_save_dir(self) -> str | None:
-        d = self._settings.get("save_dir", DEFAULT_SAVE_DIR)
+        d = str(self._settings.get("save_dir", DEFAULT_SAVE_DIR)).strip() or DEFAULT_SAVE_DIR
         try:
             Path(d).mkdir(parents=True, exist_ok=True)
             return d
         except Exception as exc:
-            QMessageBox.warning(self, "存储错误 / Save Error",
-                                f"无法创建存储目录：\n{d}\n\n{exc}")
+            log.exception("Failed to create save directory: %s", d)
+            self._set_diagnostic_error("save", f"存储目录创建失败: {d}: {exc}")
             return None
 
-    def _auto_save_frame(self) -> None:
+    def _save_array_image(self, arr: np.ndarray, path: str | Path) -> None:
+        image = np.ascontiguousarray(arr)
+        suffix = Path(path).suffix.lower()
+        if suffix in {".jpg", ".jpeg"} and image.dtype != np.uint8:
+            min_val = float(np.min(image))
+            max_val = float(np.max(image))
+            if max_val > min_val:
+                image = ((image.astype(np.float32) - min_val) * (255.0 / (max_val - min_val))).astype(np.uint8)
+            else:
+                image = np.zeros(image.shape, dtype=np.uint8)
+        Image.fromarray(image).save(path)
+
+    def _auto_save_frame(self, arr: np.ndarray) -> bool:
         if not self._settings.get("auto_save", False):
-            return
+            return True
         save_dir = self._ensure_save_dir()
         if save_dir is None:
-            return
+            self._handle_auto_save_failure("无法创建存储目录", stop_capture=True)
+            return False
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        path = f"{save_dir}\\{ts}.tif"
+        path = Path(save_dir) / f"{ts}.tif"
         try:
-            self._camera.save_image(path)
+            self._save_array_image(arr, path)
+            self._clear_diagnostic_error("save")
+            self._auto_save_error_reported = False
             self.status_changed.emit(f"已自动存储 / Auto saved: {path}")
+            log.info("Auto saved frame via Pillow: %s", path)
+            return True
         except Exception as exc:
-            QMessageBox.warning(self, "自动存储失败 / Auto Save Failed", str(exc))
+            log.exception("Auto save failed: path=%s", path)
+            self._set_diagnostic_error("save", f"自动存储失败: {path}: {exc}")
+            self._handle_auto_save_failure(f"{path}\n\n{exc}", stop_capture=True)
+            return False
 
+    def _handle_auto_save_failure(self, message: str, stop_capture: bool = False) -> None:
+        if stop_capture:
+            self._stop_capture_due_to_save_error()
+        if self._auto_save_error_reported:
+            return
+        self._auto_save_error_reported = True
+        QMessageBox.warning(
+            self,
+            "自动存储失败 / Auto Save Failed",
+            "自动存储失败，采集已停止。\n\n"
+            f"{message}\n\n"
+            "请检查存储路径是否存在、是否有权限，或路径中是否包含 SDK 不支持的字符。",
+        )
+
+    def _stop_capture_due_to_save_error(self) -> None:
+        log.warning("Stopping capture because auto-save failed")
+        self._capture_timer.stop()
+        self._batch_timer.stop()
+        try:
+            if self._camera.is_capturing:
+                self._camera.stop_capture()
+        except Exception as exc:
+            log.warning("Failed to stop capture after auto-save error: %s", exc)
+        self._acq_tab.set_capturing_state(False)
+        self._acq_tab.set_batch_state(False)
+        self.status_changed.emit("自动存储失败，采集已停止 / Auto-save failed, capture stopped")
     # ------------------------------------------------------------------
     # Acquisition callbacks
     # ------------------------------------------------------------------
@@ -542,7 +589,7 @@ class MainWindow(QMainWindow):
             if arr is not None:
                 log.info("Single frame captured: shape=%s dtype=%s", arr.shape, arr.dtype)
                 self._acq_tab.display_frame(arr)
-                self._auto_save_frame()
+                self._auto_save_frame(arr)
                 self.status_changed.emit("单帧采集完成 / Single frame captured")
             else:
                 log.warning("Single capture timed out")
@@ -607,19 +654,22 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        if self._camera.is_open:
+        if self._last_frame is not None:
             try:
-                self._camera.save_image(path)
+                self._save_array_image(self._last_frame, path)
                 self.status_changed.emit(f"已保存 / Saved: {path}")
+                log.info("Saved current frame via Pillow: %s", path)
                 return
             except Exception as exc:
+                log.exception("Manual save failed: path=%s", path)
+                self._set_diagnostic_error("save", f"手动保存失败: {path}: {exc}")
                 QMessageBox.warning(self, "保存失败 / Save Error", str(exc))
                 return
 
         QMessageBox.warning(
             self,
-            "相机未连接 / Camera Not Connected",
-            "保存功能需要相机连接。\n测试模式下请使用「载入TIF」的文件本身。",
+            "没有可保存图像 / No Image",
+            "当前没有可保存的图像。\n请先采集或载入一张图像。",
         )
 
     # ------------------------------------------------------------------
@@ -635,7 +685,8 @@ class MainWindow(QMainWindow):
             self._clear_diagnostic_error("capture")
             log.debug("Continuous frame received: shape=%s dtype=%s", arr.shape, arr.dtype)
             self._acq_tab.display_frame(arr)
-            self._auto_save_frame()
+            if not self._auto_save_frame(arr):
+                return
         else:
             status = self._camera.connection_status()
             if status is False:
