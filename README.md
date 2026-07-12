@@ -18,10 +18,12 @@
 ### 数据处理
 
 - 支持行组设置，例如 `1-40, 91-130, 200-250`
+- 行组内部支持求和或平均，默认使用求和
 - 支持一次处理最多 16 个行组的使用场景
 - 支持列合并，降低噪声或数据量
 - 支持 arPLS 基线校正
 - 支持原始数据、校正后数据、仅基线等输出模式
+- 设置页参数和气体表自动保存到 `config/user_settings.json`
 - 采集后的数据处理在后台线程执行，避免界面卡死
 - 后台任务忙时只保留最新待处理帧，避免任务队列无限堆积
 
@@ -52,7 +54,7 @@
 - 快门类型：Rolling
 - 曝光范围：`21 us ~ 10 s`
 - 数据接口：`USB 3.0` 或 `CameraLink`
-- 位深：`12 bit` / `16 bit`
+- 帧数据：固定使用 `16 bit` 容器；不同工作模式的有效位深由相机决定
 - 制冷方式：风冷、水冷
 - SDK：C、C++、C#、Python
 
@@ -79,6 +81,14 @@ uv run tucam-control
 ```powershell
 .\start_tucam.bat
 ```
+
+需要创建或修复桌面快捷方式时运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\create_desktop_shortcut.ps1
+```
+
+脚本会根据项目当前目录重新写入启动目标、工作目录和 `assets/wut_logo.ico` 图标路径，项目移动后重新运行一次即可。
 
 程序入口定义在 `pyproject.toml`：
 
@@ -148,7 +158,7 @@ Frame array stats: min=0 max=5 mean=0.5
 format=18 channels=3 elem_bytes=1
 ```
 
-说明当前帧可能是 `RGB888` 预览格式。程序会优先尝试切换到 RAW 或更高位深格式，并记录 `Data format readback` 和 `Bit depth readback`。
+说明当前帧可能不是科学相机的单通道 16 位数据。Dhyana 95 V2 不支持 `TUIDC_DATAFORMAT`，程序通过帧结构的 `ucFormatGet` 请求数据，并以实际帧头中的 `ucDepth`、`ucChannels` 和 `ucElemBytes` 为准。
 
 ## SDK 文件
 
@@ -175,7 +185,13 @@ lib/x64/
 
 ## 风扇与制冷说明
 
-程序会尝试设置风扇档位，并记录能力范围和读回值：
+程序按照 Dhyana 95 V2 的 SDK 定义提供三个风扇速度：
+
+- `0`：高速（默认）
+- `1`：中速
+- `2`：低速
+
+SDK 值 `3` 表示水冷模式下关闭风扇，程序不会提供该选项。设置时会记录能力范围和读回值：
 
 ```text
 Fan gear attr returned ...
@@ -191,13 +207,9 @@ TUIDI_FAN_SPEED returned TUCAMRET_NOT_SUPPORT
 
 这表示程序无法读取真实转速，不一定表示风扇档位设置失败。
 
-部分相机或 SDK 组合也可能不支持显式开启 TEC：
+根据 Dhyana 95 V2 属性表，该型号不支持 `TUIDC_ENABLETEC`，程序不会调用这个能力。温度控制优先使用独立目标温度属性 `TUIDP_TEMPERATURE_TARGET`；不支持时才使用开发指南中的旧版温度编码。
 
-```text
-TUCAM_Capa_SetValue(ENABLETEC=1) returned TUCAMRET_NOT_SUPPORT
-```
-
-这种情况下，程序仍会尝试设置目标温度，并把 SDK 返回码写入日志。
+实时温度始终通过 `TUIDP_TEMPERATURE` 读取，目标温度和实时温度不会再混为同一个显示值。
 
 ## 项目结构
 

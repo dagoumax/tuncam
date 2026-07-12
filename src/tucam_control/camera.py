@@ -100,7 +100,7 @@ class CameraController:
         info = cam.get_device_info()
         cam.set_exposure_time(1000)
         cam.set_temperature_target(-10)
-        cam.set_fan_gear(2)
+        cam.set_fan_gear(0)
         frame = cam.capture_single()
         cam.stop_capture()
         cam.close()
@@ -114,6 +114,10 @@ class CameraController:
         self._opened: bool = False
         self._capturing: bool = False
         self._frame: TUCAM_FRAME | None = None
+        self._temperature_target_attr: TUCAM_PROP_ATTR | None = None
+        self._temperature_target_supported: bool | None = None
+        self._temperature_target_c: float | None = None
+        self._last_frame_error: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -149,6 +153,9 @@ class CameraController:
             raise RuntimeError("Camera handle is null after open")
         self._hcam = open_param.hIdxTUCam
         self._opened = True
+        self._temperature_target_attr = None
+        self._temperature_target_supported = None
+        self._temperature_target_c = None
 
     def close(self) -> None:
         """Close the currently open camera."""
@@ -178,6 +185,10 @@ class CameraController:
     @property
     def is_capturing(self) -> bool:
         return self._capturing
+
+    @property
+    def last_frame_error(self) -> str | None:
+        return self._last_frame_error
 
     # ------------------------------------------------------------------
     # Device Information
@@ -295,53 +306,11 @@ class CameraController:
             raise RuntimeError(f"Set exposure failed: {describe_tucam_ret(result)}")
 
     def configure_scientific_frame_format(self) -> None:
-        """Prefer raw/high-bit-depth frames over RGB preview frames."""
+        """Configure the fixed scientific frame format used by Dhyana 95 V2."""
         self._check_open()
-
-        def _query_capa_attr(capa: TUCAM_IDCAPA) -> TUCAM_CAPA_ATTR:
-            attr = TUCAM_CAPA_ATTR()
-            attr.idCapa = capa.value
-            result = TUCAM_Capa_GetAttr(self._hcam, pointer(attr))
-            log.info(
-                "%s attr returned %s; min=%s max=%s default=%s step=%s",
-                capa.name,
-                describe_tucam_ret(result),
-                attr.nValMin,
-                attr.nValMax,
-                attr.nValDft,
-                attr.nValStep,
-            )
-            if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-                raise RuntimeError(f"Get {capa.name} attr failed: {describe_tucam_ret(result)}")
-            return attr
-
-        try:
-            attr = _query_capa_attr(TUCAM_IDCAPA.TUIDC_DATAFORMAT)
-            preferred_formats = (
-                TUFRM_FORMATS.TUFRM_FMT_RAW.value,
-                TUFRM_FORMATS.TUFRM_FMT_USUAl.value,
-            )
-            for fmt in preferred_formats:
-                if attr.nValMin <= fmt <= attr.nValMax:
-                    result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_DATAFORMAT.value, fmt)
-                    log.info("Set data format %s returned %s", fmt, describe_tucam_ret(result))
-                    break
-            val = c_int32(0)
-            result = TUCAM_Capa_GetValue(self._hcam, TUCAM_IDCAPA.TUIDC_DATAFORMAT.value, byref(val))
-            log.info("Data format readback returned %s; value=%s", describe_tucam_ret(result), val.value)
-        except Exception as exc:
-            log.warning("Could not configure data format: %s", exc)
-
-        try:
-            attr = _query_capa_attr(TUCAM_IDCAPA.TUIDC_BITOFDEPTH)
-            target_depth = attr.nValMax
-            result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_BITOFDEPTH.value, target_depth)
-            log.info("Set bit depth %s returned %s", target_depth, describe_tucam_ret(result))
-            val = c_int32(0)
-            result = TUCAM_Capa_GetValue(self._hcam, TUCAM_IDCAPA.TUIDC_BITOFDEPTH.value, byref(val))
-            log.info("Bit depth readback returned %s; value=%s", describe_tucam_ret(result), val.value)
-        except Exception as exc:
-            log.warning("Could not configure bit depth: %s", exc)
+        # DATAFORMAT is not supported by Dhyana 95 V2 and BITOFDEPTH is fixed.
+        # The requested format is supplied through TUCAM_FRAME.ucFormatGet.
+        log.info("Dhyana 95 V2 frame format: USUAL, fixed 16-bit sensor data")
 
     def get_exposure_time(self) -> float:
         """Get current exposure time in milliseconds."""
@@ -367,16 +336,17 @@ class CameraController:
         return (attr.dbValMin, attr.dbValMax)
 
     # ------------------------------------------------------------------
-    # Temperature  (TUIDP_TEMPERATURE / TUIDC_ENABLETEC)
+    # Temperature
     # ------------------------------------------------------------------
 
-    def _temperature_attr(self) -> TUCAM_PROP_ATTR:
+    def _temperature_attr(self, prop: TUCAM_IDPROP = TUCAM_IDPROP.TUIDP_TEMPERATURE) -> TUCAM_PROP_ATTR:
         attr = TUCAM_PROP_ATTR()
-        attr.idProp = TUCAM_IDPROP.TUIDP_TEMPERATURE.value
+        attr.idProp = prop.value
         attr.nIdxChn = 0
         result = TUCAM_Prop_GetAttr(self._hcam, pointer(attr))
         log.debug(
-            "Temperature attr returned %s; min=%s max=%s default=%s step=%s",
+            "%s attr returned %s; min=%s max=%s default=%s step=%s",
+            prop.name,
             describe_tucam_ret(result),
             attr.dbValMin,
             attr.dbValMax,
@@ -384,29 +354,97 @@ class CameraController:
             attr.dbValStep,
         )
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Get temperature range failed: {describe_tucam_ret(result)}")
+            raise RuntimeError(f"Get {prop.name} range failed: {describe_tucam_ret(result)}")
         return attr
 
+    def _target_attr(self) -> TUCAM_PROP_ATTR | None:
+        if self._temperature_target_supported is False:
+            return None
+        if self._temperature_target_attr is not None:
+            return self._temperature_target_attr
+        try:
+            attr = self._temperature_attr(TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET)
+        except RuntimeError as exc:
+            self._temperature_target_supported = False
+            log.info("Dedicated temperature target is unavailable; using legacy control: %s", exc)
+            return None
+        if attr.dbValMax <= attr.dbValMin:
+            self._temperature_target_supported = False
+            log.info(
+                "Dedicated temperature target returned an invalid range %.1f-%.1f; using legacy control",
+                attr.dbValMin,
+                attr.dbValMax,
+            )
+            return None
+        self._temperature_target_supported = True
+        self._temperature_target_attr = attr
+        return attr
+
+    @staticmethod
+    def _encode_temperature(temp_c: float, attr: TUCAM_PROP_ATTR) -> float:
+        if attr.dbValMin < 0.0:
+            return temp_c
+        scale = 10.0 if attr.dbValMax >= 500.0 else 1.0
+        return (temp_c + 50.0) * scale
+
+    @staticmethod
+    def _decode_temperature(value: float, attr: TUCAM_PROP_ATTR) -> float:
+        if attr.dbValMin < 0.0 or value < 0.0:
+            return value
+        scale = 10.0 if attr.dbValMax >= 500.0 else 1.0
+        return value / scale - 50.0
+
     def set_temperature_target(self, temp_c: float) -> None:
-        """Set target temperature in Celsius. Enables TEC automatically."""
+        """Set target temperature in Celsius using the model-supported property."""
         self._check_open()
-        result = TUCAM_Capa_SetValue(self._hcam, TUCAM_IDCAPA.TUIDC_ENABLETEC.value, 1)
-        log.debug("TUCAM_Capa_SetValue(ENABLETEC=1) returned %s", describe_tucam_ret(result))
-        sdk_value = temp_c
+        attr = self._target_attr()
+        prop = TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET
+        if attr is None:
+            prop = TUCAM_IDPROP.TUIDP_TEMPERATURE
+            attr = self._temperature_attr(prop)
+        sdk_value = self._encode_temperature(temp_c, attr)
+        if sdk_value < attr.dbValMin or sdk_value > attr.dbValMax:
+            raise ValueError(
+                f"Temperature {temp_c:.1f} C encodes to {sdk_value:.1f}, "
+                f"outside SDK range {attr.dbValMin:.1f}-{attr.dbValMax:.1f}"
+            )
         result = TUCAM_Prop_SetValue(
-            self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE.value, c_double(sdk_value), 0
+            self._hcam, prop.value, c_double(sdk_value), 0
         )
         log.info(
-            "Set temperature %.3f C (sdk_value=%.3f) returned %s",
+            "Set temperature target %.3f C via %s (sdk_value=%.3f) returned %s",
             temp_c,
+            prop.name,
             sdk_value,
             describe_tucam_ret(result),
         )
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
             raise RuntimeError(f"Set temperature target failed: {describe_tucam_ret(result)}")
+        self._temperature_target_c = temp_c
 
     def get_temperature_target(self) -> float:
-        """Get current target temperature in Celsius."""
+        """Get the configured target temperature in Celsius."""
+        self._check_open()
+        attr = self._target_attr()
+        if attr is None:
+            if self._temperature_target_c is None:
+                raise RuntimeError("Temperature target readback is not supported")
+            return self._temperature_target_c
+        val = c_double(0)
+        result = TUCAM_Prop_GetValue(
+            self._hcam, TUCAM_IDPROP.TUIDP_TEMPERATURE_TARGET.value, byref(val), 0
+        )
+        log.debug(
+            "TUCAM_Prop_GetValue(TEMPERATURE_TARGET) returned %s; sdk_value=%s",
+            describe_tucam_ret(result),
+            val.value,
+        )
+        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            raise RuntimeError(f"Get temperature target failed: {describe_tucam_ret(result)}")
+        return self._decode_temperature(val.value, attr)
+
+    def get_sensor_temperature(self) -> float:
+        """Get the current sensor temperature in Celsius."""
         self._check_open()
         val = c_double(0)
         result = TUCAM_Prop_GetValue(
@@ -418,26 +456,27 @@ class CameraController:
             val.value,
         )
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Get temperature target failed: {describe_tucam_ret(result)}")
+            raise RuntimeError(f"Get sensor temperature failed: {describe_tucam_ret(result)}")
         return val.value
 
     def get_temperature_range(self) -> tuple[float, float]:
         """Get min/max temperature target range."""
         self._check_open()
-        attr = self._temperature_attr()
-        if attr.dbValMin >= 0.0 and attr.dbValMax >= 100.0:
-            return (-50.0, 50.0)
-        return (attr.dbValMin, attr.dbValMax)
+        attr = self._target_attr() or self._temperature_attr()
+        return (
+            self._decode_temperature(attr.dbValMin, attr),
+            self._decode_temperature(attr.dbValMax, attr),
+        )
 
     # ------------------------------------------------------------------
     # Fan Gear  (TUIDC_FAN_GEAR)
     # ------------------------------------------------------------------
 
     def set_fan_gear(self, gear: int) -> None:
-        """Set fan gear (1-4). Gear 0 is NOT allowed per requirements."""
+        """Set Dhyana 95 V2 fan speed: 0=high, 1=medium, 2=low."""
         self._check_open()
-        if gear < 1 or gear > 4:
-            raise ValueError("Fan gear must be 1-4 (gear 0 / off is not permitted)")
+        if gear not in (0, 1, 2):
+            raise ValueError("Fan value must be 0 (high), 1 (medium), or 2 (low); 3 disables the fan")
         try:
             attr = TUCAM_CAPA_ATTR()
             attr.idCapa = TUCAM_IDCAPA.TUIDC_FAN_GEAR.value
@@ -475,37 +514,25 @@ class CameraController:
         return val.value
 
     def get_data_format(self) -> int:
-        """Get current frame data format capability value."""
+        """Return the requested frame format; DATAFORMAT capability is unsupported."""
         self._check_open()
-        val = c_int32(0)
-        result = TUCAM_Capa_GetValue(
-            self._hcam, TUCAM_IDCAPA.TUIDC_DATAFORMAT.value, byref(val)
-        )
-        log.debug("TUCAM_Capa_GetValue(DATAFORMAT) returned %s; value=%s", describe_tucam_ret(result), val.value)
-        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Get data format failed: {describe_tucam_ret(result)}")
-        return val.value
+        return TUFRM_FORMATS.TUFRM_FMT_USUAl.value
 
     def get_bit_depth(self) -> int:
-        """Get current bit-depth capability value."""
+        """Get frame bit depth, fixed at 16 for Dhyana 95 V2."""
         self._check_open()
-        val = c_int32(0)
-        result = TUCAM_Capa_GetValue(
-            self._hcam, TUCAM_IDCAPA.TUIDC_BITOFDEPTH.value, byref(val)
-        )
-        log.debug("TUCAM_Capa_GetValue(BITOFDEPTH) returned %s; value=%s", describe_tucam_ret(result), val.value)
-        if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
-            raise RuntimeError(f"Get bit depth failed: {describe_tucam_ret(result)}")
-        return val.value
+        if self._frame is not None and self._frame.ucDepth:
+            return int(self._frame.ucDepth)
+        return 16
 
     # ------------------------------------------------------------------
     # Working Mode  (TUIDC_IMGMODESELECT)
     # ------------------------------------------------------------------
 
-    MODE_LABELS = {0: "HDR", 1: "High Gain", 2: "Low Gain"}
+    MODE_LABELS = {0: "HDR", 1: "Std_High", 2: "Std_Low"}
 
     def set_working_mode(self, mode: int) -> None:
-        """Set working mode. 0=HDR, 1=High Gain, 2=Low Gain."""
+        """Set working mode. 0=HDR, 1=Std_High, 2=Std_Low."""
         self._check_open()
         if mode not in (0, 1, 2):
             raise ValueError(f"Invalid mode: {mode}")
@@ -554,6 +581,7 @@ class CameraController:
     def start_capture(self) -> None:
         """Alloc buffer and start sequence capture."""
         self._check_open()
+        self._last_frame_error = None
         self._alloc_buffer()
         result = TUCAM_Cap_Start(
             self._hcam, TUCAM_CAPTURE_MODES.TUCCM_SEQUENCE.value
@@ -568,8 +596,20 @@ class CameraController:
         """Stop capture and release buffer."""
         if not self._capturing:
             return
+        self.abort_wait()
+        self.finish_stop_capture()
+
+    def abort_wait(self) -> None:
+        """Interrupt a blocking frame wait without releasing its buffer."""
+        if not self._capturing:
+            return
         result = TUCAM_Buf_AbortWait(self._hcam)
         log.debug("TUCAM_Buf_AbortWait returned %s", describe_tucam_ret(result))
+
+    def finish_stop_capture(self) -> None:
+        """Stop SDK capture and release the buffer after the wait loop exits."""
+        if not self._capturing:
+            return
         result = TUCAM_Cap_Stop(self._hcam)
         log.info("TUCAM_Cap_Stop returned %s", describe_tucam_ret(result))
         self._capturing = False
@@ -586,10 +626,21 @@ class CameraController:
 
         result = TUCAM_Buf_WaitForFrame(self._hcam, pointer(self._frame), timeout_ms)
         if result.value != TUCAMRET.TUCAMRET_SUCCESS.value:
+            benign_results = {
+                TUCAMRET.TUCAMRET_ABORT.value,
+                TUCAMRET.TUCAMRET_TIMEOUT.value,
+                TUCAMRET.TUCAMRET_LOSTFRAME.value,
+                TUCAMRET.TUCAMRET_MISSFRAME.value,
+            }
+            if result.value not in benign_results:
+                self._last_frame_error = describe_tucam_ret(result)
+            else:
+                self._last_frame_error = None
             if result.value != TUCAMRET.TUCAMRET_TIMEOUT.value:
                 log.warning("TUCAM_Buf_WaitForFrame returned %s", describe_tucam_ret(result))
             return None
 
+        self._last_frame_error = None
         log.debug(
             (
                 "Frame received: index=%s size=%sx%s width_step=%s depth=%s "

@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,7 +29,7 @@ from ..data_processor import DataProcessor
 from ..gas_analyzer import GasAnalyzer, GasConfig
 
 
-DEFAULT_SAVE_DIR = str(Path.home() / "Documents" / "tucam_data")
+DEFAULT_SAVE_DIR = "data"
 
 
 class SettingsTab(QWidget):
@@ -69,17 +67,16 @@ class SettingsTab(QWidget):
         cam_form.addRow("目标温度 / Target Temperature:", self._temp_spin)
 
         self._fan_combo = QComboBox()
-        self._fan_combo.addItem("二档 / Gear 2 (默认)", 2)
-        self._fan_combo.addItem("一档 / Gear 1", 1)
-        self._fan_combo.addItem("三档 / Gear 3", 3)
-        self._fan_combo.addItem("四档 / Gear 4", 4)
+        self._fan_combo.addItem("高速 / High (默认)", 0)
+        self._fan_combo.addItem("中速 / Medium", 1)
+        self._fan_combo.addItem("低速 / Low", 2)
         self._fan_combo.setCurrentIndex(0)
         cam_form.addRow("风扇档位 / Fan Gear:", self._fan_combo)
 
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("HDR (默认)", 0)
-        self._mode_combo.addItem("High Gain (高灵敏度)", 1)
-        self._mode_combo.addItem("Low Gain (高满阱)", 2)
+        self._mode_combo.addItem("Std_High (高灵敏度)", 1)
+        self._mode_combo.addItem("Std_Low (高满阱)", 2)
         cam_form.addRow("工作模式 / Working Mode:", self._mode_combo)
 
         self._auto_save_cb = QCheckBox("采集后自动存储 / Auto Save After Capture")
@@ -102,6 +99,11 @@ class SettingsTab(QWidget):
         self._row_groups_edit = QLineEdit()
         self._row_groups_edit.setPlaceholderText("e.g. 1-40, 91-130, 200-250")
         proc_form.addRow("行分组 / Row Groups:", self._row_groups_edit)
+
+        self._row_aggregation_combo = QComboBox()
+        self._row_aggregation_combo.addItem("求和 / Sum (默认)", DataProcessor.ROW_AGGREGATION_SUM)
+        self._row_aggregation_combo.addItem("平均 / Mean", DataProcessor.ROW_AGGREGATION_MEAN)
+        proc_form.addRow("行组计算 / Row Aggregation:", self._row_aggregation_combo)
 
         self._merge_spin = QSpinBox()
         self._merge_spin.setRange(1, 256)
@@ -258,6 +260,39 @@ class SettingsTab(QWidget):
         for cfg in configs:
             self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient, cfg.raman_shift)
 
+    @staticmethod
+    def _select_combo_data(combo: QComboBox, value) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def load_settings(self, settings: dict, gas_configs: list[GasConfig]) -> None:
+        """Populate all editable controls from persisted settings."""
+        self._exp_spin.setValue(float(settings.get("exposure_time_ms", 1000.0)))
+        self._temp_spin.setValue(float(settings.get("temperature_c", -10.0)))
+        self._select_combo_data(self._fan_combo, settings.get("fan_gear", 0))
+        self._select_combo_data(self._mode_combo, settings.get("working_mode", 0))
+        self._auto_save_cb.setChecked(bool(settings.get("auto_save", False)))
+        self._save_dir_edit.setText(str(settings.get("save_dir", DEFAULT_SAVE_DIR)))
+        self._row_groups_edit.setText(str(settings.get("row_groups_text", "")))
+        self._select_combo_data(
+            self._row_aggregation_combo,
+            settings.get("row_aggregation", DataProcessor.ROW_AGGREGATION_SUM),
+        )
+        self._merge_spin.setValue(int(settings.get("merge_factor", 1)))
+        self._batch_interval_spin.setValue(int(settings.get("batch_interval_ms", 1000)))
+        self._select_combo_data(
+            self._smooth_combo,
+            settings.get("concentration_smoothing", "balanced"),
+        )
+        self._arpls_enable_cb.setChecked(bool(settings.get("arpls_enabled", True)))
+        self._select_combo_data(self._arpls_mode_combo, settings.get("arpls_mode", "corrected"))
+        self._arpls_lam_spin.setValue(float(settings.get("arpls_lam", 1e5)))
+        self._arpls_iter_spin.setValue(int(settings.get("arpls_max_iter", 50)))
+        self._arpls_tol_spin.setValue(float(settings.get("arpls_tol", 1e-6)))
+        if gas_configs:
+            self.update_gas_table(gas_configs)
+
     def _on_add_gas(self) -> None:
         self._add_gas_row("New", 0, 15, 1.0, 0.0)
 
@@ -349,6 +384,7 @@ class SettingsTab(QWidget):
             "auto_save": self._auto_save_cb.isChecked(),
             "save_dir": save_dir,
             "row_groups_text": raw_text,
+            "row_aggregation": self._row_aggregation_combo.currentData(),
             "merge_factor": self._merge_spin.value(),
             "batch_interval_ms": self._batch_interval_spin.value(),
             "concentration_smoothing": self._smooth_combo.currentData(),

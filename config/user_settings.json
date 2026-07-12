@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "settings": {
+    "exposure_time_ms": 1000.0,
+    "temperature_c": -10.0,
+    "fan_gear": 0,
+    "working_mode": 0,
+    "auto_save": false,
+    "save_dir": "data",
+    "row_groups_text": "",
+    "row_aggregation": "sum",
+    "merge_factor": 1,
+    "arpls_enabled": true,
+    "arpls_mode": "corrected",
+    "arpls_lam": 10000.0,
+    "arpls_max_iter": 50,
+    "arpls_tol": 1e-06,
+    "concentration_smoothing": "balanced",
+    "batch_interval_ms": 1000
+  },
+  "gas_configs": [
+    {
+      "name": "O2",
+      "position": 572,
+      "window": 15,
+      "coefficient": 1.0,
+      "raman_shift": 1558.0
+    },
+    {
+      "name": "N2",
+      "position": 1015,
+      "window": 15,
+      "coefficient": 1.0,
+      "raman_shift": 2333.0
+    },
+    {
+      "name": "CO2",
+      "position": 488,
+      "window": 15,
+      "coefficient": 1.0,
+      "raman_shift": 1387.0
+    },
+    {
+      "name": "halong",
+      "position": 179,
+      "window": 15,
+      "coefficient": 1.0,
+      "raman_shift": 753.6
+    }
+  ]
+}

@@ -30,7 +30,12 @@ from PySide6.QtWidgets import (
 
 from ..camera import CameraInfo
 
-_GEAR_LABELS = {1: "一档 / Gear 1", 2: "二档 / Gear 2", 3: "三档 / Gear 3", 4: "四档 / Gear 4"}
+_GEAR_LABELS = {
+    0: "高速 / High",
+    1: "中速 / Medium",
+    2: "低速 / Low",
+    3: "关闭（水冷）/ Off (Water Cooling)",
+}
 
 
 class ImageLabel(QLabel):

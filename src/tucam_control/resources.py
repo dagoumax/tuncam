@@ -21,3 +21,8 @@ def app_icon_path() -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def user_settings_path() -> Path:
+    """Return the portable per-project settings file path."""
+    return project_root() / "config" / "user_settings.json"

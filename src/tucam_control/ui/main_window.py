@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QMainWindow,
     QTabWidget,
@@ -25,20 +25,78 @@ from ..concentration_smoother import AdaptiveConcentrationSmoother
 from ..data_processor import DataProcessor
 from ..debug_log import get_debug_logger
 from ..gas_analyzer import GasAnalyzer
+from ..resources import project_root
+from ..settings_store import load_user_settings, save_user_settings
 from .acquisition_tab import AcquisitionTab
 from .settings_tab import SettingsTab
 from .data_tab import DataTab
 from .concentration_tab import ConcentrationTab
 
 
-DEFAULT_SAVE_DIR = str(Path.home() / "Documents" / "tucam_data")
-CAPTURE_POLL_TIMEOUT_MS = 50
+DEFAULT_SAVE_DIR = "data"
+CAPTURE_WAIT_TIMEOUT_MS = 500
 log = get_debug_logger("ui.main_window")
 
 
 class _ProcessingSignals(QObject):
     finished = Signal(object)
     failed = Signal(str)
+
+
+class _CaptureWorker(QObject):
+    frame_ready = Signal(int, object)
+    telemetry_ready = Signal(int, object)
+    failed = Signal(int, str)
+    finished = Signal(int)
+
+    def __init__(self, camera: CameraController, generation: int) -> None:
+        super().__init__()
+        self._camera = camera
+        self._generation = generation
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            while not self._stop_requested and self._camera.is_capturing:
+                arr = self._camera.wait_for_frame(timeout_ms=CAPTURE_WAIT_TIMEOUT_MS)
+                if self._stop_requested or not self._camera.is_capturing:
+                    break
+                if arr is None:
+                    if self._camera.last_frame_error:
+                        self.failed.emit(self._generation, self._camera.last_frame_error)
+                        break
+                    if self._camera.connection_status() is False:
+                        self.failed.emit(self._generation, "设备连接已断开")
+                        break
+                    continue
+                self.frame_ready.emit(self._generation, arr)
+                self.telemetry_ready.emit(self._generation, self._read_telemetry())
+        except Exception as exc:
+            log.exception("Capture worker failed")
+            self.failed.emit(self._generation, str(exc))
+        finally:
+            self.finished.emit(self._generation)
+            QThread.currentThread().quit()
+
+    def _read_telemetry(self) -> dict:
+        telemetry = {}
+        readers = {
+            "exposure_readback_ms": self._camera.get_exposure_time,
+            "temperature_readback_c": self._camera.get_sensor_temperature,
+            "fan_readback": self._camera.get_fan_gear,
+            "bit_depth": self._camera.get_bit_depth,
+            "working_mode": self._camera.get_working_mode,
+        }
+        for name, reader in readers.items():
+            try:
+                telemetry[name] = reader()
+            except Exception as exc:
+                log.debug("Capture telemetry %s failed: %s", name, exc)
+        return telemetry
 
 
 class _ProcessingTask(QRunnable):
@@ -73,6 +131,7 @@ class _ProcessingTask(QRunnable):
 
             processor = DataProcessor()
             processor.row_groups = row_groups
+            processor.row_aggregation = self._settings.get("row_aggregation", DataProcessor.ROW_AGGREGATION_SUM)
             processor.merge_factor = self._settings.get("merge_factor", 1)
             processor.arPLS_enabled = self._settings.get("arpls_enabled", False)
             processor.baseline_mode = self._settings.get("arpls_mode", "raw")
@@ -125,11 +184,12 @@ class MainWindow(QMainWindow):
         self._settings: dict = {
             "exposure_time_ms": 1000.0,
             "temperature_c": -10.0,
-            "fan_gear": 2,
+            "fan_gear": 0,
             "working_mode": 0,
             "auto_save": False,
             "save_dir": DEFAULT_SAVE_DIR,
             "row_groups_text": "",
+            "row_aggregation": DataProcessor.ROW_AGGREGATION_SUM,
             "merge_factor": 1,
             "arpls_enabled": True,
             "arpls_mode": "corrected",
@@ -139,6 +199,33 @@ class MainWindow(QMainWindow):
             "concentration_smoothing": "balanced",
             "batch_interval_ms": 1000,
         }
+        try:
+            persisted_settings, persisted_gases = load_user_settings()
+            for key, default in tuple(self._settings.items()):
+                if key not in persisted_settings:
+                    continue
+                value = persisted_settings[key]
+                if isinstance(default, bool):
+                    if isinstance(value, bool):
+                        self._settings[key] = value
+                elif isinstance(default, int):
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        self._settings[key] = int(value)
+                elif isinstance(default, float):
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        self._settings[key] = float(value)
+                elif isinstance(value, str):
+                    self._settings[key] = value
+            if self._settings["row_aggregation"] not in (
+                DataProcessor.ROW_AGGREGATION_SUM,
+                DataProcessor.ROW_AGGREGATION_MEAN,
+            ):
+                self._settings["row_aggregation"] = DataProcessor.ROW_AGGREGATION_SUM
+            if persisted_gases:
+                self._analyzer.gases = persisted_gases
+            log.info("Loaded user settings: keys=%s gases=%s", sorted(persisted_settings), len(persisted_gases))
+        except Exception as exc:
+            log.warning("Could not load user settings; defaults will be used: %s", exc)
         self._was_connected = False
         self._disconnect_warned = False
         self._last_frame: np.ndarray | None = None
@@ -151,6 +238,10 @@ class MainWindow(QMainWindow):
         self._processing_durations_ms: deque[float] = deque(maxlen=30)
         self._dropped_pending_frames = 0
         self._auto_save_error_reported = False
+        self._capture_thread: QThread | None = None
+        self._capture_worker: _CaptureWorker | None = None
+        self._capture_generation = 0
+        self._capture_stopping = False
         self._diagnostics: dict = {
             "connection": "未连接 / Disconnected",
             "frame_count": 0,
@@ -178,15 +269,12 @@ class MainWindow(QMainWindow):
         self._processing_pool.setMaxThreadCount(1)
 
         self._setup_ui()
+        self._settings_tab.load_settings(self._settings, self._analyzer.gases)
         self._connect_signals()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(1000)
         self._refresh_timer.timeout.connect(self._on_refresh_info)
         self._refresh_timer.start()
-
-        self._capture_timer = QTimer(self)
-        self._capture_timer.setInterval(200)
-        self._capture_timer.timeout.connect(self._on_capture_poll)
 
         self._batch_images: list[tuple[str, np.ndarray]] = []
         self._batch_idx: int = 0
@@ -347,7 +435,7 @@ class MainWindow(QMainWindow):
 
         self._update_diagnostics(
             exposure_readback_ms=_read("exposure", self._camera.get_exposure_time, lambda v: f"{v:.1f}"),
-            temperature_readback_c=_read("temperature target", self._camera.get_temperature_target, lambda v: f"{v:.1f}"),
+            temperature_readback_c=_read("sensor temperature", self._camera.get_sensor_temperature, lambda v: f"{v:.1f}"),
             fan_readback=_read("fan gear", self._camera.get_fan_gear),
             data_format=_read("data format", self._camera.get_data_format),
             bit_depth=_read("bit depth", self._camera.get_bit_depth),
@@ -362,13 +450,13 @@ class MainWindow(QMainWindow):
     def _on_reconnect(self) -> None:
         log.info("Reconnect requested")
         self._update_diagnostics(connection="正在重新连接 / Reconnecting")
-        self._capture_timer.stop()
-        if self._camera.is_capturing:
-            try:
-                self._camera.stop_capture()
-            except Exception as exc:
-                log.warning("Failed to stop capture before reconnect: %s", exc)
-            self._acq_tab.set_capturing_state(False)
+        if not self._stop_continuous_capture("reconnect"):
+            QMessageBox.warning(
+                self,
+                "无法重新连接 / Reconnect Blocked",
+                "采集线程仍在运行，为避免 SDK 崩溃，本次重新连接已取消。",
+            )
+            return
 
         try:
             self._camera.close()
@@ -501,12 +589,15 @@ class MainWindow(QMainWindow):
 
     def _ensure_save_dir(self) -> str | None:
         d = str(self._settings.get("save_dir", DEFAULT_SAVE_DIR)).strip() or DEFAULT_SAVE_DIR
+        path = Path(d).expanduser()
+        if not path.is_absolute():
+            path = project_root() / path
         try:
-            Path(d).mkdir(parents=True, exist_ok=True)
-            return d
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
         except Exception as exc:
-            log.exception("Failed to create save directory: %s", d)
-            self._set_diagnostic_error("save", f"存储目录创建失败: {d}: {exc}")
+            log.exception("Failed to create save directory: %s", path)
+            self._set_diagnostic_error("save", f"存储目录创建失败: {path}: {exc}")
             return None
 
     def _save_array_image(self, arr: np.ndarray, path: str | Path) -> None:
@@ -559,13 +650,8 @@ class MainWindow(QMainWindow):
 
     def _stop_capture_due_to_save_error(self) -> None:
         log.warning("Stopping capture because auto-save failed")
-        self._capture_timer.stop()
         self._batch_timer.stop()
-        try:
-            if self._camera.is_capturing:
-                self._camera.stop_capture()
-        except Exception as exc:
-            log.warning("Failed to stop capture after auto-save error: %s", exc)
+        self._stop_continuous_capture("auto-save error")
         self._acq_tab.set_capturing_state(False)
         self._acq_tab.set_batch_state(False)
         self.status_changed.emit("自动存储失败，采集已停止 / Auto-save failed, capture stopped")
@@ -619,13 +705,14 @@ class MainWindow(QMainWindow):
         try:
             log.info("Continuous capture requested")
             self._camera.start_capture()
+            self._start_capture_worker()
             self._acq_tab.set_capturing_state(True)
-            self._capture_timer.start()
             self._clear_diagnostic_error("capture")
-            log.info("Continuous capture timer started interval_ms=%s", self._capture_timer.interval())
+            log.info("Continuous capture worker started")
             self.status_changed.emit("连续采集中 / Continuous capture running")
         except Exception as exc:
             log.exception("Continuous capture start failed")
+            self._stop_continuous_capture("start failure")
             self._set_diagnostic_error("capture", f"启动采集失败: {exc}")
             QMessageBox.critical(
                 self,
@@ -636,11 +723,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_stop(self) -> None:
         log.info("Capture stop requested")
-        self._capture_timer.stop()
-        try:
-            self._camera.stop_capture()
-        except Exception as exc:
-            log.warning("Failed to stop capture: %s", exc)
+        self._stop_continuous_capture("user request")
         self._acq_tab.set_capturing_state(False)
         self.status_changed.emit("采集已停止 / Capture stopped")
 
@@ -673,31 +756,109 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------------
-    # Continuous poll & refresh
+    # Continuous capture worker & refresh
     # ------------------------------------------------------------------
 
-    @Slot()
-    def _on_capture_poll(self) -> None:
-        if not self._camera.is_capturing:
+    def _start_capture_worker(self) -> None:
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            raise RuntimeError("Capture worker is already running")
+        self._capture_generation += 1
+        generation = self._capture_generation
+        thread = QThread(self)
+        worker = _CaptureWorker(self._camera, generation)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.frame_ready.connect(self._on_capture_worker_frame)
+        worker.telemetry_ready.connect(self._on_capture_worker_telemetry)
+        worker.failed.connect(self._on_capture_worker_failed)
+        worker.finished.connect(self._on_capture_worker_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._capture_thread = thread
+        self._capture_worker = worker
+        thread.start()
+
+    def _stop_continuous_capture(self, reason: str) -> bool:
+        if self._capture_stopping:
+            return False
+        self._capture_stopping = True
+        self._capture_generation += 1
+        worker = self._capture_worker
+        thread = self._capture_thread
+        try:
+            log.info("Stopping continuous capture: %s", reason)
+            if worker is not None:
+                worker.request_stop()
+            if self._camera.is_capturing:
+                self._camera.abort_wait()
+            if thread is not None and thread.isRunning():
+                if not thread.wait(2000):
+                    log.error("Capture worker did not stop within 2000 ms")
+                    self._set_diagnostic_error("capture", "采集线程未能及时停止")
+                    return False
+            if self._camera.is_capturing:
+                self._camera.finish_stop_capture()
+            self._capture_worker = None
+            self._capture_thread = None
+            return True
+        except Exception as exc:
+            log.warning("Failed to stop continuous capture (%s): %s", reason, exc)
+            self._set_diagnostic_error("capture", f"停止采集失败: {exc}")
+            return False
+        finally:
+            self._capture_stopping = False
+
+    @Slot(int, object)
+    def _on_capture_worker_frame(self, generation: int, arr: np.ndarray) -> None:
+        if generation != self._capture_generation or not self._camera.is_capturing:
             return
-        arr = self._camera.wait_for_frame(timeout_ms=CAPTURE_POLL_TIMEOUT_MS)
-        if arr is not None:
-            self._clear_diagnostic_error("capture")
-            log.debug("Continuous frame received: shape=%s dtype=%s", arr.shape, arr.dtype)
-            self._acq_tab.display_frame(arr)
-            if not self._auto_save_frame(arr):
-                return
-        else:
-            status = self._camera.connection_status()
-            if status is False:
-                log.warning("Capture poll detected disconnected device")
-                self._on_device_lost()
-            elif status is None:
-                log.debug("Capture poll got no frame; connection status unknown")
+        self._clear_diagnostic_error("capture")
+        log.debug("Continuous frame received: shape=%s dtype=%s", arr.shape, arr.dtype)
+        self._acq_tab.display_frame(arr)
+        self._auto_save_frame(arr)
+
+    @Slot(int, object)
+    def _on_capture_worker_telemetry(self, generation: int, telemetry: dict) -> None:
+        if generation != self._capture_generation:
+            return
+        formatted = dict(telemetry)
+        if "exposure_readback_ms" in formatted:
+            formatted["exposure_readback_ms"] = f"{formatted['exposure_readback_ms']:.1f}"
+        if "temperature_readback_c" in formatted:
+            formatted["temperature_readback_c"] = f"{formatted['temperature_readback_c']:.1f}"
+        self._update_diagnostics(**formatted)
+
+    @Slot(int, str)
+    def _on_capture_worker_failed(self, generation: int, message: str) -> None:
+        if generation != self._capture_generation:
+            return
+        log.warning("Capture worker reported failure: %s", message)
+        self._set_diagnostic_error("capture", f"采集线程失败: {message}")
+        if "断开" in message:
+            self._on_device_lost()
+            return
+        self._stop_continuous_capture("worker failure")
+        self._acq_tab.set_capturing_state(False)
+        QMessageBox.warning(
+            self,
+            "采集已停止 / Capture Stopped",
+            f"后台采集发生错误：\n{message}",
+        )
+
+    @Slot(int)
+    def _on_capture_worker_finished(self, generation: int) -> None:
+        if generation != self._capture_generation or self._capture_stopping:
+            return
+        log.warning("Capture worker exited unexpectedly")
+        self._stop_continuous_capture("worker exited")
+        self._acq_tab.set_capturing_state(False)
 
     @Slot()
     def _on_refresh_info(self) -> None:
         if not self._camera.is_open:
+            return
+        if self._camera.is_capturing:
             return
         try:
             info = self._camera.get_device_info()
@@ -718,15 +879,11 @@ class MainWindow(QMainWindow):
         log.warning("Device lost handler triggered")
         self._disconnect_warned = True
         self._was_connected = False
-        self._capture_timer.stop()
         self._acq_tab.set_capturing_state(False)
         self._settings_tab.update_device_status(None)
         self._update_diagnostics(connection="已断开 / Disconnected")
         self._set_diagnostic_error("connection", "设备连接已断开")
-        try:
-            self._camera.stop_capture()
-        except Exception as exc:
-            log.warning("Failed to stop capture after device lost: %s", exc)
+        self._stop_continuous_capture("device lost")
         self.status_changed.emit("设备已断开！/ Device disconnected!")
         QMessageBox.warning(
             self,
@@ -788,14 +945,39 @@ class MainWindow(QMainWindow):
         new_gas_signature = self._gas_signature(updates.get("gas_configs", self._analyzer.gases))
         old_smoothing = self._settings.get("concentration_smoothing", "balanced")
 
-        self._settings.update(updates)
+        self._settings.update({key: value for key, value in updates.items() if key != "gas_configs"})
         self._batch_timer.setInterval(self._settings.get("batch_interval_ms", 1000))
         self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
         self._processing_generation += 1
         if self._camera.is_open:
+            resume_capture = self._camera.is_capturing
+            if resume_capture:
+                log.info("Pausing capture to apply camera settings safely")
+                self._stop_continuous_capture("apply settings")
+                if self._camera.is_capturing:
+                    self._set_diagnostic_error("settings", "无法安全停止采集，设置未应用")
+                    return
             self._apply_current_settings()
+            if resume_capture:
+                try:
+                    self._camera.start_capture()
+                    self._start_capture_worker()
+                    self._acq_tab.set_capturing_state(True)
+                    log.info("Capture resumed after applying camera settings")
+                except Exception as exc:
+                    log.exception("Failed to resume capture after applying settings")
+                    self._acq_tab.set_capturing_state(False)
+                    self._set_diagnostic_error("capture", f"设置后恢复采集失败: {exc}")
+                    QMessageBox.warning(
+                        self,
+                        "恢复采集失败 / Resume Failed",
+                        f"设置已经应用，但连续采集未能恢复：\n{exc}",
+                    )
 
         self._processor.row_groups = groups
+        self._processor.row_aggregation = self._settings.get(
+            "row_aggregation", DataProcessor.ROW_AGGREGATION_SUM
+        )
         self._processor.merge_factor = self._settings.get("merge_factor", 1)
         self._processor.arPLS_enabled = self._settings.get("arpls_enabled", False)
         self._processor.baseline_mode = self._settings.get("arpls_mode", "raw")
@@ -825,6 +1007,14 @@ class MainWindow(QMainWindow):
             self._conc_tab.clear_history()
 
         self._reprocess_cached()
+
+        try:
+            path = save_user_settings(self._settings, self._analyzer.gases)
+            log.info("User settings saved: %s", path)
+            self._clear_diagnostic_error("settings_save")
+        except Exception as exc:
+            log.exception("Failed to save user settings")
+            self._set_diagnostic_error("settings_save", f"设置保存失败: {exc}")
 
         self.status_changed.emit("设置已应用 / Settings applied")
 
@@ -1044,8 +1234,16 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         log.info("Application window closing")
         self._refresh_timer.stop()
-        self._capture_timer.stop()
         self._batch_timer.stop()
+        if not self._stop_continuous_capture("application close"):
+            self._refresh_timer.start()
+            event.ignore()
+            QMessageBox.warning(
+                self,
+                "暂时无法关闭 / Close Blocked",
+                "采集线程未能安全退出。程序已保留相机资源，请稍后再次关闭并查看诊断日志。",
+            )
+            return
         self._pending_frame = None
         self._processing_pool.waitForDone(1000)
         try:

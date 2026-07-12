@@ -75,8 +75,8 @@ class DataProcessor:
     Process a 2-D grayscale image array.
 
     Pipeline:
-        1. Row grouping — extract specified row ranges, take the mean
-           across rows to produce a 1-D spectrum per group.
+        1. Row grouping — extract specified row ranges and sum them by
+           default, or take the mean, to produce one spectrum per group.
         2. Column merging — average adjacent columns by *merge_factor*.
         3. Baseline correction (arPLS) — estimate and optionally subtract
            the baseline from each spectrum.
@@ -87,9 +87,12 @@ class DataProcessor:
     BASELINE_RAW = "raw"
     BASELINE_CORRECTED = "corrected"
     BASELINE_ONLY = "baseline"
+    ROW_AGGREGATION_SUM = "sum"
+    ROW_AGGREGATION_MEAN = "mean"
 
     def __init__(self) -> None:
         self._row_groups: list[tuple[int, int]] = []
+        self._row_aggregation: str = self.ROW_AGGREGATION_SUM
         self._merge_factor: int = 1
         self._arPLS_enabled: bool = False
         self._arPLS_lam: float = 1e5
@@ -115,6 +118,16 @@ class DataProcessor:
             if s < 1 or e < s:
                 raise ValueError(f"Invalid row group: ({s}, {e})")
         self._row_groups = groups
+
+    @property
+    def row_aggregation(self) -> str:
+        return self._row_aggregation
+
+    @row_aggregation.setter
+    def row_aggregation(self, mode: str) -> None:
+        if mode not in (self.ROW_AGGREGATION_SUM, self.ROW_AGGREGATION_MEAN):
+            raise ValueError(f"Unknown row aggregation mode: {mode}")
+        self._row_aggregation = mode
 
     @property
     def merge_factor(self) -> int:
@@ -208,7 +221,11 @@ class DataProcessor:
             e_idx = end
             if e_idx > h:
                 raise ValueError(f"Row range ({start}, {end}) exceeds image height {h}")
-            row_block = image[s_idx:e_idx, :].mean(axis=0, dtype=np.float64)
+            row_data = image[s_idx:e_idx, :]
+            if self._row_aggregation == self.ROW_AGGREGATION_SUM:
+                row_block = row_data.sum(axis=0, dtype=np.float64)
+            else:
+                row_block = row_data.mean(axis=0, dtype=np.float64)
             spectra.append(row_block)
 
         merged = np.vstack(spectra)
