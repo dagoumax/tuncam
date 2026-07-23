@@ -190,7 +190,8 @@ class _ProcessingTask(QRunnable):
                 "labels": labels,
                 "gas_names": gas_names,
                 "all_results": all_results,
-                "mode": "index" if self._batch_mode else "time",
+                # Test images and camera frames share the same local-time chart path.
+                "mode": "time",
             })
         except Exception as exc:
             log.exception("Processing task failed")
@@ -231,7 +232,7 @@ class MainWindow(QMainWindow):
             "concentration_smoothing": "balanced",
             "batch_interval_ms": 1000,
             "export_sample_rate_hz": 1000,
-            "gas_emergency_stop": False,
+            "statistics_window_seconds": 60,
         }
         try:
             persisted_settings, persisted_gases = load_user_settings()
@@ -273,7 +274,6 @@ class MainWindow(QMainWindow):
         self._processing_durations_ms: deque[float] = deque(maxlen=30)
         self._dropped_pending_frames = 0
         self._auto_save_error_reported = False
-        self._gas_alarm_stopped = False
         self._capture_thread: QThread | None = None
         self._capture_worker: _CaptureWorker | None = None
         self._capture_generation = 0
@@ -311,6 +311,12 @@ class MainWindow(QMainWindow):
         self._configure_concentration_smoothing()
         self._settings_tab.load_settings(self._settings, self._analyzer.gases)
         self._conc_tab.set_export_sample_rate_hz(self._settings["export_sample_rate_hz"])
+        self._conc_tab.set_statistics_window_seconds(
+            self._settings["statistics_window_seconds"]
+        )
+        self._conc_tab.set_alarm_thresholds({
+            gas.name: gas.alarm_concentration for gas in self._analyzer.gases
+        })
         self._connect_signals()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(1000)
@@ -359,6 +365,9 @@ class MainWindow(QMainWindow):
 
         self._settings_tab.settings_changed.connect(self._on_settings_changed)
         self._conc_tab.emergency_stop_requested.connect(self._on_emergency_stop)
+        self._conc_tab.statistics_window_changed.connect(
+            self._on_statistics_window_changed
+        )
 
         self._acq_tab.frame_ready.connect(self._on_frame_ready)
         self._data_tab.calibration_changed.connect(self._on_calibration_changed)
@@ -378,6 +387,26 @@ class MainWindow(QMainWindow):
             export_smoothed,
         )
         return applied
+
+    @Slot(int)
+    def _on_statistics_window_changed(self, window_seconds: int) -> None:
+        self._settings["statistics_window_seconds"] = max(
+            1, min(86400, int(window_seconds))
+        )
+        try:
+            path = save_user_settings(self._settings, self._analyzer.gases)
+            log.info(
+                "Statistics window changed: seconds=%s settings=%s",
+                self._settings["statistics_window_seconds"],
+                path,
+            )
+            self._clear_diagnostic_error("settings_save")
+        except Exception as exc:
+            log.exception("Failed to save statistics window")
+            self._set_diagnostic_error(
+                "settings_save",
+                f"统计窗口保存失败: {exc}",
+            )
 
     # ------------------------------------------------------------------
     # Camera management
@@ -574,6 +603,7 @@ class MainWindow(QMainWindow):
                     f"仅支持单通道灰度 TIF 图像。\n当前图像维度: {arr.ndim}",
                 )
                 return
+            self._conc_tab.mark_history_gap()
             self._acq_tab.display_frame(arr)
             self.status_changed.emit(f"已载入 / Loaded: {Path(path).name}")
             self._tabs.setCurrentIndex(2)
@@ -624,8 +654,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "加载失败", "没有成功加载任何图像。")
             return
 
+        self._processing_generation += 1
+        self._pending_frame = None
         self._batch_idx = 0
         self._conc_tab.clear_history()
+        self._concentration_smoother.reset()
         self._acq_tab.set_batch_state(True)
         self._batch_timer.setInterval(self._settings.get("batch_interval_ms", 1000))
         self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
@@ -662,6 +695,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_batch_stop(self) -> None:
         self._batch_timer.stop()
+        self._processing_generation += 1
+        self._pending_frame = None
+        self._concentration_smoother.reset()
+        self._conc_tab.mark_history_gap()
         self._acq_tab.set_batch_state(False)
         log.info(
             "Batch test stopped: processed_or_queued=%s total=%s",
@@ -758,6 +795,7 @@ class MainWindow(QMainWindow):
             return
         try:
             log.info("Single capture requested")
+            self._conc_tab.mark_history_gap()
             arr = self._camera.capture_single()
             if arr is not None:
                 log.info("Single frame captured: shape=%s dtype=%s", arr.shape, arr.dtype)
@@ -791,7 +829,7 @@ class MainWindow(QMainWindow):
             return
         try:
             log.info("Continuous capture requested")
-            self._gas_alarm_stopped = False
+            self._conc_tab.mark_history_gap()
             self._camera.start_capture()
             self._start_capture_worker()
             self._acq_tab.set_capturing_state(True)
@@ -885,6 +923,7 @@ class MainWindow(QMainWindow):
         thread = self._capture_thread
         try:
             log.info("Stopping continuous capture: %s", reason)
+            self._conc_tab.mark_history_gap()
             if worker is not None:
                 worker.request_stop()
             if self._camera.is_capturing:
@@ -1048,6 +1087,9 @@ class MainWindow(QMainWindow):
         self._conc_tab.set_export_sample_rate_hz(
             self._settings.get("export_sample_rate_hz", 1000)
         )
+        self._conc_tab.set_statistics_window_seconds(
+            self._settings.get("statistics_window_seconds", 60)
+        )
         self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
         self._processing_generation += 1
         if self._camera.is_open:
@@ -1089,6 +1131,9 @@ class MainWindow(QMainWindow):
         gas_configs = updates.get("gas_configs")
         if gas_configs is not None:
             self._analyzer.gases = gas_configs
+        self._conc_tab.set_alarm_thresholds({
+            gas.name: gas.alarm_concentration for gas in self._analyzer.gases
+        })
         self._analyzer.merge_factor = self._settings.get("merge_factor", 1)
         self._analyzer.threshold_sigma = self._settings.get(
             "detection_threshold_sigma", 3.0
@@ -1203,7 +1248,6 @@ class MainWindow(QMainWindow):
             self._data_tab.set_baseline_data(payload["baseline"])
 
             self._conc_tab.set_gas_names(payload["gas_names"])
-            alarm_triggered = False
             if payload["all_results"]:
                 display_results = self._concentration_smoother.smooth_groups(
                     payload["all_results"],
@@ -1216,11 +1260,6 @@ class MainWindow(QMainWindow):
                     mode=payload["mode"],
                     raw_group_results=payload["all_results"],
                 )
-                alarm_triggered = self._check_smoothed_gas_alarm(
-                    display_results,
-                    payload["labels"],
-                    payload["mode"],
-                )
             log.info(
                 "Processing finished: duration_ms=%.1f result_shape=%s labels=%s mode=%s",
                 payload["duration_ms"],
@@ -1228,60 +1267,10 @@ class MainWindow(QMainWindow):
                 payload["labels"],
                 payload["mode"],
             )
-            if not alarm_triggered:
-                self.status_changed.emit(
-                    f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
-                )
-        self._start_pending_processing()
-
-    def _check_smoothed_gas_alarm(
-        self,
-        group_results: list[list],
-        group_labels: list[str],
-        mode: str,
-    ) -> bool:
-        if (
-            not self._settings.get("gas_emergency_stop", False)
-            or mode != "time"
-            or not self._camera.is_capturing
-            or self._gas_alarm_stopped
-        ):
-            return False
-
-        thresholds = {
-            cfg.name: cfg.alarm_concentration
-            for cfg in self._analyzer.gases
-            if cfg.alarm_concentration is not None
-        }
-        for group_index, results in enumerate(group_results):
-            group_label = (
-                group_labels[group_index]
-                if group_index < len(group_labels)
-                else f"Group {group_index + 1}"
+            self.status_changed.emit(
+                f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
             )
-            for result in results:
-                threshold = thresholds.get(result.name)
-                concentration = float(result.concentration) * 100.0
-                if threshold is None or concentration < threshold:
-                    continue
-                self._gas_alarm_stopped = True
-                self._pending_frame = None
-                log.warning(
-                    "Smoothed gas alarm reached: group=%s gas=%s "
-                    "concentration=%.4f%% threshold=%.4f%%",
-                    group_label,
-                    result.name,
-                    concentration,
-                    threshold,
-                )
-                self._stop_continuous_capture("smoothed gas concentration alarm")
-                self._acq_tab.set_capturing_state(False)
-                self.status_changed.emit(
-                    f"{result.name} 达到报警浓度，采集已停止 / "
-                    f"Alarm reached in {group_label}; capture stopped"
-                )
-                return True
-        return False
+        self._start_pending_processing()
 
     @staticmethod
     def _gas_signature(configs: list) -> tuple:
@@ -1306,6 +1295,7 @@ class MainWindow(QMainWindow):
     def _on_processing_failed(self, message: str) -> None:
         self._processing_busy = False
         self._processing_task = None
+        self._conc_tab.mark_history_gap()
         log.warning("Processing failed: %s", message)
         self._set_diagnostic_error("processing", f"处理失败: {message}")
         self._update_diagnostics(processing_busy=False, pending_frame=self._pending_frame is not None)
@@ -1383,8 +1373,18 @@ class MainWindow(QMainWindow):
                     f"行 {s}-{e}"
                     for s, e in (row_groups if row_groups else [(1, arr.shape[0])])
                 ]
-                mode = "index" if self._batch_timer.isActive() else "time"
-                self._conc_tab.add_data_point(all_results, group_labels, mode=mode)
+                mode = "time"
+                display_results = self._concentration_smoother.smooth_groups(
+                    all_results,
+                    group_labels,
+                    mode,
+                )
+                self._conc_tab.add_data_point(
+                    display_results,
+                    group_labels,
+                    mode=mode,
+                    raw_group_results=all_results,
+                )
         except Exception as exc:
             QMessageBox.warning(
                 self,

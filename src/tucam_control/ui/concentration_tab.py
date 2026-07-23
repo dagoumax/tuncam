@@ -11,6 +11,7 @@ import numpy as np
 import pyqtgraph as pg
 from scipy.interpolate import PchipInterpolator
 from PySide6.QtCore import QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
+from ..threshold_statistics import ThresholdStatisticsTracker
 from ._mpl_style import COLORS, WINDOW_SIZE
 
 MIN_TIME_SPAN_SECONDS = 30.0
@@ -55,6 +58,7 @@ class ConcentrationTab(QWidget):
     """Fourth tab: current concentrations table + trend chart (multi-group)."""
 
     emergency_stop_requested = Signal()
+    statistics_window_changed = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -71,6 +75,7 @@ class ConcentrationTab(QWidget):
         self._display_y_range: tuple[float, float] | None = None
         self._export_smoothed: bool = True
         self._export_sample_rate_hz: int = 1000
+        self._statistics = ThresholdStatisticsTracker(window_seconds=60)
         self._display_animation: dict[tuple[str, str], dict[str, float]] = {}
         self._curve_items: dict[tuple[str, str], pg.PlotDataItem] = {}
         self._marker_items: dict[tuple[str, str], pg.ScatterPlotItem] = {}
@@ -82,7 +87,8 @@ class ConcentrationTab(QWidget):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
+        top_layout = QHBoxLayout()
 
         # -- Left: current concentrations --
         left = QVBoxLayout()
@@ -153,7 +159,7 @@ class ConcentrationTab(QWidget):
 
         left.addWidget(gb_ctrl)
         left.addStretch()
-        layout.addLayout(left)
+        top_layout.addLayout(left)
 
         # -- Right: trend chart --
         right = QVBoxLayout()
@@ -167,7 +173,49 @@ class ConcentrationTab(QWidget):
         self._legend = self._plot_item.addLegend(offset=(-12, 12))
         right.addWidget(self._plot_widget, 1)
 
-        layout.addLayout(right, 2)
+        top_layout.addLayout(right, 2)
+        layout.addLayout(top_layout, 3)
+
+        stats_group = QGroupBox("阈值统计 / Threshold Statistics")
+        stats_layout = QVBoxLayout(stats_group)
+        self._statistics_table = QTableWidget()
+        self._statistics_table.setColumnCount(9)
+        self._statistics_table.setHorizontalHeaderLabels([
+            "行组 / Group",
+            "气体 / Gas",
+            "当前 (%)",
+            "阈值 (%)",
+            "连续 (s)",
+            "累计 (s)",
+            "N秒点数",
+            "N秒均值 (%)",
+            "状态 / Status",
+        ])
+        stats_header = self._statistics_table.horizontalHeader()
+        stats_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        stats_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self._statistics_table.verticalHeader().setDefaultSectionSize(30)
+        self._statistics_table.setMinimumHeight(185)
+        stats_layout.addWidget(self._statistics_table)
+
+        stats_actions = QHBoxLayout()
+        stats_actions.addWidget(QLabel("统计窗口 N / Statistics Window:"))
+        self._statistics_window_spin = QSpinBox()
+        self._statistics_window_spin.setRange(1, 86400)
+        self._statistics_window_spin.setValue(60)
+        self._statistics_window_spin.setSingleStep(10)
+        self._statistics_window_spin.setSuffix(" s")
+        self._statistics_window_spin.setMinimumWidth(120)
+        self._statistics_window_spin.valueChanged.connect(
+            self._on_statistics_window_changed
+        )
+        self._btn_export_statistics = QPushButton("导出统计摘要 / Export Summary")
+        self._btn_export_statistics.clicked.connect(self._on_export_statistics)
+        stats_actions.addWidget(self._statistics_window_spin)
+        stats_actions.addStretch()
+        stats_actions.addWidget(self._btn_export_statistics)
+        stats_layout.addLayout(stats_actions)
+        layout.addWidget(stats_group, 1)
 
     # ------------------------------------------------------------------
     # Public API
@@ -201,6 +249,27 @@ class ConcentrationTab(QWidget):
     def set_export_sample_rate_hz(self, sample_rate_hz: int) -> None:
         self._export_sample_rate_hz = max(1, min(1000, int(sample_rate_hz)))
 
+    def set_statistics_window_seconds(self, window_seconds: int) -> None:
+        normalized = max(1, min(86400, int(window_seconds)))
+        self._statistics_window_spin.blockSignals(True)
+        self._statistics_window_spin.setValue(normalized)
+        self._statistics_window_spin.blockSignals(False)
+        self._statistics.set_window_seconds(window_seconds)
+        self._refresh_statistics_table()
+
+    def _on_statistics_window_changed(self, window_seconds: int) -> None:
+        self._statistics.set_window_seconds(window_seconds)
+        self._refresh_statistics_table()
+        self.statistics_window_changed.emit(self._statistics.window_seconds)
+
+    def set_alarm_thresholds(self, thresholds: dict[str, float | None]) -> None:
+        self._statistics.set_thresholds(thresholds)
+        self._refresh_statistics_table()
+
+    def mark_history_gap(self) -> None:
+        self._statistics.mark_gap()
+        self._refresh_statistics_table()
+
     def add_data_point(
         self,
         all_group_results: list,
@@ -214,12 +283,9 @@ class ConcentrationTab(QWidget):
         *all_group_results*: list of list of GasResult (per group, per gas).
         *group_labels*: labels for each group.
         """
-        self._mode = mode
-        if mode == "index":
-            t = float(self._batch_idx)
-            self._batch_idx += 1
-        else:
-            t = datetime.now()
+        # Every source uses the same local system clock and chart animation.
+        self._mode = "time"
+        t = datetime.now()
 
         self._append_results(self._history, all_group_results, group_labels, t)
         self._append_results(
@@ -228,6 +294,7 @@ class ConcentrationTab(QWidget):
             group_labels,
             t,
         )
+        self._statistics.update(all_group_results, group_labels, t)
         self._update_display_animation(all_group_results, group_labels)
 
         self.set_group_labels(group_labels)
@@ -236,17 +303,20 @@ class ConcentrationTab(QWidget):
         self._new_data = True
         if all_group_results:
             self._update_table(all_group_results[0])
+        self._refresh_statistics_table()
         self._redraw()
 
     def clear_history(self) -> None:
         self._history.clear()
         self._raw_history.clear()
+        self._statistics.reset()
         self._display_animation.clear()
         self._batch_idx = 0
         self._display_y_range = None
         self._table.setRowCount(0)
         self._hide_inactive_plot_items(set())
         self._total_label.setText("浓度总和 / Total: --")
+        self._statistics_table.setRowCount(0)
         self._do_redraw()
 
     # ------------------------------------------------------------------
@@ -688,6 +758,104 @@ class ConcentrationTab(QWidget):
 
     def _on_clear(self) -> None:
         self.clear_history()
+
+    def _refresh_statistics_table(self) -> None:
+        snapshots = self._statistics.snapshots()
+        self._statistics_table.setRowCount(len(snapshots))
+        warning_background = QColor("#ffd6d6")
+        warning_foreground = QColor("#8b0000")
+
+        for row, snapshot in enumerate(snapshots):
+            if snapshot.threshold_percent is None:
+                threshold = "--"
+                continuous = "--"
+                cumulative = "--"
+                status = "未配置阈值 / Not Set"
+            else:
+                threshold = f"{snapshot.threshold_percent:.3f}"
+                continuous = f"{snapshot.continuous_seconds:.1f}"
+                cumulative = f"{snapshot.cumulative_seconds:.1f}"
+                status = "超限 / Above" if snapshot.is_above else "正常 / Normal"
+
+            values = (
+                snapshot.group_label,
+                snapshot.gas_name,
+                f"{snapshot.current_percent:.3f}",
+                threshold,
+                continuous,
+                cumulative,
+                str(snapshot.sample_count),
+                f"{snapshot.mean_percent:.3f}",
+                status,
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if snapshot.is_above:
+                    item.setBackground(warning_background)
+                    item.setForeground(warning_foreground)
+                self._statistics_table.setItem(row, column, item)
+
+    def _on_export_statistics(self) -> None:
+        snapshots = self._statistics.snapshots()
+        if not snapshots:
+            QMessageBox.information(self, "导出 / Export", "没有统计数据可导出。")
+            return
+
+        ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
+        default_name = f"threshold_statistics_{ts}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出阈值统计摘要 / Export Threshold Statistics",
+            self._last_export_dir or default_name,
+            "CSV (*.csv)",
+        )
+        if not path:
+            return
+        self._last_export_dir = path
+
+        try:
+            self._write_statistics_csv(path, snapshots)
+            QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
+
+    def _write_statistics_csv(self, path: str, snapshots: list) -> None:
+        generated_at = self._format_export_time(datetime.now())
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "生成时间 / Generated At",
+                "行组 / Group",
+                "气体 / Gas",
+                "当前浓度 (%) / Current",
+                "报警浓度 (%) / Threshold",
+                "连续超限 (s) / Continuous",
+                "累计超限 (s) / Cumulative",
+                "统计窗口 (s) / Window",
+                "样本数 / Samples",
+                "平均值 (%) / Mean",
+                "状态 / Status",
+            ])
+            for snapshot in snapshots:
+                configured = snapshot.threshold_percent is not None
+                writer.writerow([
+                    generated_at,
+                    snapshot.group_label,
+                    snapshot.gas_name,
+                    f"{snapshot.current_percent:.6f}",
+                    f"{snapshot.threshold_percent:.6f}" if configured else "",
+                    f"{snapshot.continuous_seconds:.3f}" if configured else "",
+                    f"{snapshot.cumulative_seconds:.3f}" if configured else "",
+                    self._statistics.window_seconds,
+                    snapshot.sample_count,
+                    f"{snapshot.mean_percent:.6f}",
+                    (
+                        "超限 / Above"
+                        if snapshot.is_above
+                        else "正常 / Normal" if configured
+                        else "未配置阈值 / Not Set"
+                    ),
+                ])
 
     def _on_export(self) -> None:
         glabel = self._group_combo.currentData()

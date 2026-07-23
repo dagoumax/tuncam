@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal, Slot
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -45,6 +49,64 @@ class SettingsTab(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.setStyleSheet(
+            """
+            SettingsTab { font-size: 14px; }
+            SettingsTab QGroupBox {
+                font-size: 15px;
+                font-weight: 600;
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 10px;
+            }
+            SettingsTab QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+            SettingsTab QLabel, SettingsTab QCheckBox { font-size: 14px; }
+            SettingsTab QLineEdit, SettingsTab QComboBox,
+            SettingsTab QSpinBox, SettingsTab QDoubleSpinBox {
+                min-height: 32px;
+                font-size: 14px;
+                padding: 1px 6px;
+            }
+            SettingsTab QPushButton {
+                min-height: 32px;
+                font-size: 14px;
+                padding: 3px 12px;
+            }
+            SettingsTab QTableWidget { font-size: 14px; }
+            SettingsTab QHeaderView::section {
+                min-height: 30px;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 5px;
+            }
+            """
+        )
+
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_content = QWidget()
+        settings_layout = QGridLayout(settings_content)
+        settings_layout.setContentsMargins(2, 2, 8, 8)
+        settings_layout.setHorizontalSpacing(14)
+        settings_layout.setVerticalSpacing(14)
+        settings_layout.setColumnStretch(0, 1)
+        settings_layout.setColumnStretch(1, 1)
+        self._settings_scroll.setWidget(settings_content)
+        layout.addWidget(self._settings_scroll, 1)
+
+        device_column = QWidget()
+        device_column_layout = QVBoxLayout(device_column)
+        device_column_layout.setContentsMargins(0, 0, 0, 0)
+        device_column_layout.setSpacing(14)
 
         # ---- Camera settings ----
         cam_gb = QGroupBox("相机设置 / Camera Settings")
@@ -91,7 +153,7 @@ class SettingsTab(QWidget):
         save_path_row.addWidget(self._btn_browse)
         cam_form.addRow("存储路径 / Save Path:", save_path_row)
 
-        layout.addWidget(cam_gb)
+        settings_layout.addWidget(cam_gb, 0, 0)
 
         # ---- Data processing settings ----
         proc_gb = QGroupBox("数据处理 / Data Processing")
@@ -118,7 +180,8 @@ class SettingsTab(QWidget):
         self._threshold_sigma_spin.setSingleStep(0.05)
         self._threshold_sigma_spin.setValue(3.0)
         self._threshold_sigma_spin.setToolTip(
-            "检出阈值 = 此系数 × 整条光谱的标准差；数值越低越容易检出弱峰。"
+            "检出阈值 = 此系数 × 排除已标记气体峰后的稳健噪声；"
+            "数值越低越容易检出弱峰。"
         )
         proc_form.addRow("检出阈值系数 / Detection Threshold:", self._threshold_sigma_spin)
 
@@ -144,10 +207,7 @@ class SettingsTab(QWidget):
         self._export_sample_rate_spin.setSuffix(" Hz")
         proc_form.addRow("采样率 / Sample Rate:", self._export_sample_rate_spin)
 
-        self._gas_emergency_stop_cb = QCheckBox("气体急停 / Gas Emergency Stop")
-        proc_form.addRow("", self._gas_emergency_stop_cb)
-
-        layout.addWidget(proc_gb)
+        settings_layout.addWidget(proc_gb, 0, 1)
 
         # ---- arPLS baseline correction ----
         arpls_gb = QGroupBox("基线校正 / Baseline Correction (arPLS)")
@@ -183,7 +243,7 @@ class SettingsTab(QWidget):
         self._arpls_tol_spin.setSingleStep(1e-6)
         arpls_form.addRow("收敛容差 tol:", self._arpls_tol_spin)
 
-        layout.addWidget(arpls_gb)
+        settings_layout.addWidget(arpls_gb, 1, 0)
 
         # ---- Gas configuration ----
         gas_gb = QGroupBox("气体配置 / Gas Configuration")
@@ -200,8 +260,13 @@ class SettingsTab(QWidget):
             "报警浓度 (%) / Alarm Conc",
             "检出阈值 / Detection Sigma",
         ])
-        self._gas_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._gas_table.setMinimumHeight(120)
+        gas_header = self._gas_table.horizontalHeader()
+        gas_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        gas_header.setMinimumSectionSize(90)
+        for column, width in enumerate((150, 100, 100, 110, 150, 180, 190)):
+            self._gas_table.setColumnWidth(column, width)
+        self._gas_table.verticalHeader().setDefaultSectionSize(34)
+        self._gas_table.setMinimumHeight(240)
         gas_layout.addWidget(self._gas_table)
 
         gas_btn_row = QHBoxLayout()
@@ -214,7 +279,7 @@ class SettingsTab(QWidget):
         gas_btn_row.addStretch()
         gas_layout.addLayout(gas_btn_row)
 
-        layout.addWidget(gas_gb)
+        settings_layout.addWidget(gas_gb, 2, 0, 1, 2)
 
         # ---- Device status ----
         status_gb = QGroupBox("设备状态 / Device Status")
@@ -225,7 +290,7 @@ class SettingsTab(QWidget):
         status_layout.addRow("连接状态 / Connection:", self._status_connect)
         status_layout.addRow("设备名称 / Device:", self._status_name)
         status_layout.addRow("温度 / Temperature:", self._status_temp)
-        layout.addWidget(status_gb)
+        device_column_layout.addWidget(status_gb)
 
         # ---- Info labels ----
         info_gb = QGroupBox("参数范围 / Property Ranges")
@@ -234,18 +299,56 @@ class SettingsTab(QWidget):
         self._temp_range_label = QLabel("N/A")
         info_form.addRow("曝光范围 / Exposure Range:", self._exp_range_label)
         info_form.addRow("温度范围 / Temperature Range:", self._temp_range_label)
-        layout.addWidget(info_gb)
+        device_column_layout.addWidget(info_gb)
+        device_column_layout.addStretch()
+        settings_layout.addWidget(device_column, 1, 1)
+
+        for form in (cam_form, proc_form, arpls_form, status_layout, info_form):
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setHorizontalSpacing(12)
+            form.setVerticalSpacing(10)
 
         # ---- Apply button ----
         btn_row = QHBoxLayout()
         self._btn_apply = QPushButton("应用设置 / Apply Settings")
-        self._btn_apply.setMinimumHeight(40)
+        self._btn_apply.setMinimumSize(190, 42)
         self._btn_apply.clicked.connect(self._on_apply)
         btn_row.addStretch()
         btn_row.addWidget(self._btn_apply)
         layout.addLayout(btn_row)
 
-        layout.addStretch()
+        self._settings_layout = settings_layout
+        self._settings_sections = (cam_gb, proc_gb, arpls_gb, device_column, gas_gb)
+        self._compact_layout: bool | None = None
+        self._reflow_settings_layout(self.width() < 1180)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_settings_layout"):
+            self._reflow_settings_layout(event.size().width() < 1180)
+
+    def _reflow_settings_layout(self, compact: bool) -> None:
+        if self._compact_layout == compact:
+            return
+        self._compact_layout = compact
+        cam_gb, proc_gb, arpls_gb, device_column, gas_gb = self._settings_sections
+        for section in self._settings_sections:
+            self._settings_layout.removeWidget(section)
+
+        if compact:
+            for row, section in enumerate((cam_gb, proc_gb, arpls_gb, device_column)):
+                self._settings_layout.addWidget(section, row, 0)
+            self._settings_layout.addWidget(gas_gb, 4, 0)
+            self._settings_layout.setColumnStretch(0, 1)
+            self._settings_layout.setColumnStretch(1, 0)
+        else:
+            self._settings_layout.addWidget(cam_gb, 0, 0)
+            self._settings_layout.addWidget(proc_gb, 0, 1)
+            self._settings_layout.addWidget(arpls_gb, 1, 0)
+            self._settings_layout.addWidget(device_column, 1, 1)
+            self._settings_layout.addWidget(gas_gb, 2, 0, 1, 2)
+            self._settings_layout.setColumnStretch(0, 1)
+            self._settings_layout.setColumnStretch(1, 1)
 
     def _init_gas_table(self) -> None:
         configs = GasAnalyzer.default_gases()
@@ -347,9 +450,6 @@ class SettingsTab(QWidget):
         )
         self._batch_interval_spin.setValue(int(settings.get("batch_interval_ms", 1000)))
         self._export_sample_rate_spin.setValue(int(settings.get("export_sample_rate_hz", 1000)))
-        self._gas_emergency_stop_cb.setChecked(
-            bool(settings.get("gas_emergency_stop", False))
-        )
         self._select_combo_data(
             self._smooth_combo,
             settings.get("concentration_smoothing", "balanced"),
@@ -458,7 +558,6 @@ class SettingsTab(QWidget):
             "detection_threshold_sigma": self._threshold_sigma_spin.value(),
             "batch_interval_ms": self._batch_interval_spin.value(),
             "export_sample_rate_hz": self._export_sample_rate_spin.value(),
-            "gas_emergency_stop": self._gas_emergency_stop_cb.isChecked(),
             "concentration_smoothing": self._smooth_combo.currentData(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),
             "arpls_mode": self._arpls_mode_combo.currentData(),

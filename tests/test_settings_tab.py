@@ -36,7 +36,6 @@ def test_settings_apply_emits_normalized_values() -> None:
     tab._threshold_sigma_spin.setValue(3.0)
     tab._smooth_combo.setCurrentIndex(0)
     tab._export_sample_rate_spin.setValue(1000)
-    tab._gas_emergency_stop_cb.setChecked(True)
 
     tab._on_apply()
 
@@ -53,7 +52,8 @@ def test_settings_apply_emits_normalized_values() -> None:
     assert updates["detection_threshold_sigma"] == 3.0
     assert updates["concentration_smoothing"] == "off"
     assert updates["export_sample_rate_hz"] == 1000
-    assert updates["gas_emergency_stop"] is True
+    assert "statistics_window_seconds" not in updates
+    assert "gas_emergency_stop" not in updates
     assert len(updates["gas_configs"]) >= 1
 
 
@@ -63,6 +63,27 @@ def test_device_status_hides_unsupported_zero_temperatures() -> None:
     tab.update_device_status(CameraInfo(model="Dhyana", serial_number="S1"))
 
     assert tab._status_temp.text() == "N/A"
+
+
+def test_settings_layout_is_scrollable_readable_and_two_column() -> None:
+    app = _app()
+    tab = SettingsTab()
+    tab.resize(1400, 900)
+    tab.show()
+    app.processEvents()
+    grid = tab._settings_scroll.widget().layout()
+
+    assert tab._settings_scroll.widgetResizable() is True
+    assert grid.columnCount() == 2
+    assert grid.itemAtPosition(2, 0).widget() is tab._settings_sections[-1]
+    assert tab._gas_table.minimumHeight() >= 240
+    assert tab._btn_apply.minimumHeight() >= 40
+    assert "font-size: 14px" in tab.styleSheet()
+
+    tab.resize(1024, 768)
+    app.processEvents()
+    assert tab._compact_layout is True
+    assert grid.itemAtPosition(4, 0).widget() is tab._settings_sections[-1]
 
 
 def test_persisted_settings_populate_editable_controls() -> None:
@@ -79,7 +100,6 @@ def test_persisted_settings_populate_editable_controls() -> None:
             "row_aggregation": "mean",
             "merge_factor": 4,
             "detection_threshold_sigma": 1.75,
-            "gas_emergency_stop": True,
         },
         gases,
     )
@@ -91,5 +111,4 @@ def test_persisted_settings_populate_editable_controls() -> None:
     assert tab._row_aggregation_combo.currentData() == "mean"
     assert tab._merge_spin.value() == 4
     assert tab._threshold_sigma_spin.value() == 1.75
-    assert tab._gas_emergency_stop_cb.isChecked() is True
     assert tab._get_gas_configs() == gases

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from datetime import datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -49,6 +50,77 @@ def test_emergency_stop_button_emits_request() -> None:
     tab._btn_emergency_stop.click()
 
     assert emitted == [True]
+
+
+def test_all_measurement_sources_use_current_local_time() -> None:
+    _app()
+    tab = ConcentrationTab()
+    before = datetime.now()
+    result = GasResult("O2", 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, True)
+
+    tab.add_data_point([[result]], ["行 1-10"], mode="index")
+
+    after = datetime.now()
+    recorded = tab._history["行 1-10"]["O2"][1][0]
+    assert before <= recorded <= after
+    assert tab._mode == "time"
+
+
+def test_threshold_statistics_table_highlights_above_limit() -> None:
+    _app()
+    tab = ConcentrationTab()
+    tab.set_alarm_thresholds({"halong": 10.0})
+    result = GasResult("halong", 0, 0, 1.0, 1.0, 1.0, 0.12, 0.12, True)
+
+    tab.add_data_point([[result]], ["行 1-10"])
+
+    assert tab._statistics_table.rowCount() == 1
+    assert tab._statistics_table.item(0, 8).text() == "超限 / Above"
+    assert tab._statistics_table.item(0, 0).background().color().name() == "#ffd6d6"
+
+
+def test_clear_history_resets_threshold_statistics() -> None:
+    _app()
+    tab = ConcentrationTab()
+    result = GasResult("O2", 0, 0, 1.0, 1.0, 1.0, 0.2, 0.2, True)
+    tab.add_data_point([[result]], ["行 1-10"])
+
+    tab.clear_history()
+
+    assert tab._statistics.snapshots() == []
+    assert tab._statistics_table.rowCount() == 0
+
+
+def test_threshold_summary_csv_contains_mean_and_millisecond_time(tmp_path: Path) -> None:
+    _app()
+    tab = ConcentrationTab()
+    tab.set_statistics_window_seconds(60)
+    tab.set_alarm_thresholds({"halong": 10.0})
+    result = GasResult("halong", 0, 0, 1.0, 1.0, 1.0, 0.12, 0.12, True)
+    tab.add_data_point([[result]], ["行 1-10"])
+    path = tmp_path / "summary.csv"
+
+    tab._write_statistics_csv(str(path), tab._statistics.snapshots())
+
+    text = path.read_text(encoding="utf-8-sig")
+    assert "连续超限 (s) / Continuous" in text
+    assert "平均值 (%) / Mean" in text
+    assert "标准差" not in text
+    assert "行 1-10,halong,12.000000,10.000000" in text
+    generated = text.splitlines()[1].split(",")[0]
+    assert len(generated.rsplit(".", 1)[-1]) == 3
+
+
+def test_statistics_window_is_changed_from_concentration_page() -> None:
+    _app()
+    tab = ConcentrationTab()
+    emitted: list[int] = []
+    tab.statistics_window_changed.connect(emitted.append)
+
+    tab._statistics_window_spin.setValue(120)
+
+    assert tab._statistics.window_seconds == 120
+    assert emitted == [120]
 
 
 def test_smoothed_export_is_resampled_to_1000_hz() -> None:

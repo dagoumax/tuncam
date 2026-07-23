@@ -56,7 +56,7 @@ class AdaptiveConcentrationSmoother:
     def smooth_groups(self, all_group_results: list, group_labels: list[str], mode: str) -> list:
         """Return a smoothed deep copy of grouped GasResult values."""
         profile = PROFILES.get(self._profile_name, PROFILES["balanced"])
-        if not profile.enabled or mode != "time":
+        if not profile.enabled:
             return copy.deepcopy(all_group_results)
 
         smoothed_groups = []

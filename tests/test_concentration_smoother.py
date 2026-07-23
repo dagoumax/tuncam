@@ -18,16 +18,20 @@ def _result(name: str, concentration: float) -> GasResult:
     )
 
 
-def test_batch_mode_is_not_smoothed() -> None:
-    smoother = AdaptiveConcentrationSmoother()
+def test_batch_and_camera_modes_use_identical_smoothing() -> None:
+    batch_smoother = AdaptiveConcentrationSmoother()
+    camera_smoother = AdaptiveConcentrationSmoother()
     first = [[_result("O2", 0.2), _result("N2", 0.8)]]
     second = [[_result("O2", 0.9), _result("N2", 0.1)]]
 
-    smoother.smooth_groups(first, ["行 1-10"], mode="index")
-    out = smoother.smooth_groups(second, ["行 1-10"], mode="index")
+    batch_smoother.smooth_groups(first, ["行 1-10"], mode="index")
+    batch_out = batch_smoother.smooth_groups(second, ["行 1-10"], mode="index")
+    camera_smoother.smooth_groups(first, ["行 1-10"], mode="time")
+    camera_out = camera_smoother.smooth_groups(second, ["行 1-10"], mode="time")
 
-    assert out[0][0].concentration == 0.9
-    assert out[0][1].concentration == 0.1
+    assert batch_out == camera_out
+    assert batch_out[0][0].concentration != 0.9
+    assert batch_out[0][1].concentration != 0.1
 
 
 def test_responsive_profile_follows_large_change() -> None:

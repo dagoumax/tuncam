@@ -19,7 +19,7 @@
     "concentration_smoothing": "extra_smooth",
     "batch_interval_ms": 1000,
     "export_sample_rate_hz": 1,
-    "gas_emergency_stop": false
+    "statistics_window_seconds": 210
   },
   "gas_configs": [
     {
