@@ -9,7 +9,8 @@ import time
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer
+from scipy.interpolate import PchipInterpolator
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -53,6 +54,8 @@ class LocalTimeAxis(pg.AxisItem):
 class ConcentrationTab(QWidget):
     """Fourth tab: current concentrations table + trend chart (multi-group)."""
 
+    emergency_stop_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         # _history[group_label][gas_name] = (vals, times)
@@ -67,7 +70,11 @@ class ConcentrationTab(QWidget):
         self._last_export_dir: str = ""
         self._display_y_range: tuple[float, float] | None = None
         self._export_smoothed: bool = True
+        self._export_sample_rate_hz: int = 1000
         self._display_animation: dict[tuple[str, str], dict[str, float]] = {}
+        self._curve_items: dict[tuple[str, str], pg.PlotDataItem] = {}
+        self._marker_items: dict[tuple[str, str], pg.ScatterPlotItem] = {}
+        self._legend_signature: tuple[tuple[tuple[str, str], str], ...] = ()
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setInterval(DISPLAY_ANIMATION_INTERVAL_MS)
@@ -125,6 +132,14 @@ class ConcentrationTab(QWidget):
         btn_row.addWidget(self._btn_export)
         ctrl_layout.addLayout(btn_row)
 
+        self._btn_emergency_stop = QPushButton("急停 / Emergency Stop")
+        self._btn_emergency_stop.setStyleSheet(
+            "QPushButton { background-color: #c62828; color: white; font-weight: bold; "
+            "min-height: 34px; } QPushButton:hover { background-color: #b71c1c; }"
+        )
+        self._btn_emergency_stop.clicked.connect(self.emergency_stop_requested.emit)
+        ctrl_layout.addWidget(self._btn_emergency_stop)
+
         ctrl_layout.addWidget(QLabel("导出范围 / Export Range:"))
         self._export_range_combo = QComboBox()
         self._export_range_combo.addItem("全部历史 / All History", "all")
@@ -159,10 +174,16 @@ class ConcentrationTab(QWidget):
     # ------------------------------------------------------------------
 
     def set_gas_names(self, names: list[str]) -> None:
+        names = list(names)
+        if names == self._gas_names and self._combo_data(self._gas_combo) == ["all", *names]:
+            return
         self._gas_names = names
         self._update_gas_combo()
 
     def set_group_labels(self, labels: list[str]) -> None:
+        labels = list(labels)
+        if labels == self._group_labels and self._combo_data(self._group_combo) == ["__all__", *labels]:
+            return
         self._group_labels = labels
         self._group_combo.blockSignals(True)
         current = self._group_combo.currentData()
@@ -176,6 +197,9 @@ class ConcentrationTab(QWidget):
 
     def set_export_smoothed(self, enabled: bool) -> None:
         self._export_smoothed = enabled
+
+    def set_export_sample_rate_hz(self, sample_rate_hz: int) -> None:
+        self._export_sample_rate_hz = max(1, min(1000, int(sample_rate_hz)))
 
     def add_data_point(
         self,
@@ -221,6 +245,7 @@ class ConcentrationTab(QWidget):
         self._batch_idx = 0
         self._display_y_range = None
         self._table.setRowCount(0)
+        self._hide_inactive_plot_items(set())
         self._total_label.setText("浓度总和 / Total: --")
         self._do_redraw()
 
@@ -228,12 +253,20 @@ class ConcentrationTab(QWidget):
     # Internal
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _combo_data(combo: QComboBox) -> list[object]:
+        return [combo.itemData(index) for index in range(combo.count())]
+
     def _update_gas_combo(self) -> None:
         self._gas_combo.blockSignals(True)
+        current = self._gas_combo.currentData()
         self._gas_combo.clear()
         self._gas_combo.addItem("全部 / All", "all")
         for name in self._gas_names:
             self._gas_combo.addItem(name, name)
+        index = self._gas_combo.findData(current)
+        if index >= 0:
+            self._gas_combo.setCurrentIndex(index)
         self._gas_combo.blockSignals(False)
 
     def _selected_group_data(self) -> dict[str, tuple[list[float], list[object]]]:
@@ -288,8 +321,6 @@ class ConcentrationTab(QWidget):
         if not self.isVisible():
             return
         self._dirty = False
-        self._plot_item.clear()
-        self._legend.clear()
 
         glabel = self._group_combo.currentData()
         selected_gas = self._gas_combo.currentData()
@@ -320,6 +351,7 @@ class ConcentrationTab(QWidget):
         elif not is_all_groups:
             group_data = self._selected_group_data()
             if not group_data:
+                self._hide_inactive_plot_items(set())
                 self._plot_item.setTitle("")
                 return
             series, total_pts, title = self._group_series(group_data, selected_gas, glabel)
@@ -391,6 +423,8 @@ class ConcentrationTab(QWidget):
         all_x: list[float] = []
         all_y: list[float] = []
         show_legend = len(series) <= 24
+        active_keys: set[tuple[str, str]] = set()
+        legend_entries: list[tuple[tuple[str, str], str]] = []
 
         live_x_max = None
 
@@ -403,11 +437,15 @@ class ConcentrationTab(QWidget):
 
             if is_datetime and len(x_vals) >= 2:
                 progress = self._time_aligned_display_progress(clipped_times)
-                animated_last = self._current_display_value(series_key, y_vals[-1], progress)
                 tail_count = max(3, DISPLAY_TAIL_SEGMENTS)
                 tail_x_end = x_vals[-2] + (x_vals[-1] - x_vals[-2]) * progress
                 tail_x = np.linspace(x_vals[-2], tail_x_end, tail_count).tolist()
-                tail_y = np.linspace(y_vals[-2], animated_last, tail_count).tolist()
+                animation = self._display_animation.get(series_key, {})
+                from_y = float(animation.get("from_y", y_vals[-2]))
+                to_y = float(animation.get("to_y", y_vals[-1]))
+                phase = np.linspace(0.0, progress, tail_count)
+                eased_phase = self._smoothstep(phase)
+                tail_y = (from_y + (to_y - from_y) * eased_phase).tolist()
                 x_vals = x_vals[:-2] + tail_x
                 y_vals = y_vals[:-2] + tail_y
                 live_x_max = tail_x_end if live_x_max is None else max(live_x_max, tail_x_end)
@@ -419,19 +457,54 @@ class ConcentrationTab(QWidget):
             all_x.extend(x_vals)
             all_y.extend(y_vals)
             pen = pg.mkPen(color=color, width=1.4)
-            name = label if show_legend else None
-            self._plot_item.plot(x_vals, y_vals, pen=pen, name=name)
-            self._plot_item.plot(
+            curve = self._curve_items.get(series_key)
+            marker = self._marker_items.get(series_key)
+            if curve is None:
+                curve = pg.PlotDataItem()
+                marker = pg.ScatterPlotItem(size=6)
+                self._plot_item.addItem(curve)
+                self._plot_item.addItem(marker)
+                self._curve_items[series_key] = curve
+                self._marker_items[series_key] = marker
+            curve.setPen(pen)
+            curve.setData(x_vals, y_vals)
+            curve.setVisible(True)
+            marker.setData(
                 [x_vals[-1]],
                 [y_vals[-1]],
-                pen=None,
-                symbol="o",
-                symbolSize=6,
-                symbolBrush=color,
-                symbolPen=pg.mkPen(color=color),
+                brush=color,
+                pen=pg.mkPen(color=color),
             )
+            marker.setVisible(True)
+            active_keys.add(series_key)
+            if show_legend:
+                legend_entries.append((series_key, label))
 
+        self._hide_inactive_plot_items(active_keys)
+        self._update_legend(tuple(legend_entries))
         self._apply_ranges(all_x, all_y, live_x_max)
+
+    @staticmethod
+    def _smoothstep(value):
+        value = np.clip(value, 0.0, 1.0)
+        return value * value * (3.0 - 2.0 * value)
+
+    def _hide_inactive_plot_items(self, active_keys: set[tuple[str, str]]) -> None:
+        for key, curve in self._curve_items.items():
+            visible = key in active_keys
+            curve.setVisible(visible)
+            self._marker_items[key].setVisible(visible)
+
+    def _update_legend(
+        self,
+        signature: tuple[tuple[tuple[str, str], str], ...],
+    ) -> None:
+        if signature == self._legend_signature:
+            return
+        self._legend.clear()
+        for key, label in signature:
+            self._legend.addItem(self._curve_items[key], label)
+        self._legend_signature = signature
 
     @staticmethod
     def _series_uses_datetime(
@@ -464,12 +537,24 @@ class ConcentrationTab(QWidget):
                 key = (glabel, result.name)
                 target = float(result.concentration * 100)
                 vals = self._history.get(glabel, {}).get(result.name, ([], []))[0]
+                times = self._history.get(glabel, {}).get(result.name, ([], []))[1]
                 previous = float(vals[-2]) if len(vals) >= 2 else target
                 start_value = self._current_display_value(key, previous)
+                duration = DISPLAY_ANIMATION_DURATION_S
+                if (
+                    len(times) >= 2
+                    and isinstance(times[-2], datetime)
+                    and isinstance(times[-1], datetime)
+                ):
+                    duration = max(
+                        0.2,
+                        min(10.0, (times[-1] - times[-2]).total_seconds()),
+                    )
                 self._display_animation[key] = {
                     "from_y": start_value,
                     "to_y": target,
                     "start": now,
+                    "duration": duration,
                 }
 
     def _current_display_value(
@@ -495,9 +580,10 @@ class ConcentrationTab(QWidget):
             return 1.0
 
         elapsed = max(0.0, time.monotonic() - animation["start"])
-        if elapsed >= DISPLAY_ANIMATION_DURATION_S:
+        duration = animation.get("duration", DISPLAY_ANIMATION_DURATION_S)
+        if elapsed >= duration:
             return 1.0
-        return elapsed / DISPLAY_ANIMATION_DURATION_S
+        return elapsed / duration
 
     @staticmethod
     def _time_aligned_display_progress(times: list[object]) -> float:
@@ -520,7 +606,8 @@ class ConcentrationTab(QWidget):
 
         now = time.monotonic()
         return any(
-            now - animation["start"] < DISPLAY_ANIMATION_DURATION_S
+            now - animation["start"]
+            < animation.get("duration", DISPLAY_ANIMATION_DURATION_S)
             for animation in self._display_animation.values()
         )
 
@@ -667,12 +754,6 @@ class ConcentrationTab(QWidget):
                 if lbl in history and gas in history[lbl]:
                     columns.append((gas, lbl, f"{gas}({lbl})"))
 
-        max_len = 0
-        for gas, lbl, _ in columns:
-            vals, times = history[lbl][gas]
-            filtered = self._filtered_pairs(vals, times, export_range)
-            max_len = max(max_len, len(filtered[0]))
-
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
@@ -684,15 +765,17 @@ class ConcentrationTab(QWidget):
             for gas, lbl, _ in columns:
                 vals, times = history[lbl][gas]
                 export_vals, export_times = self._filtered_pairs(vals, times, export_range)
+                export_vals, export_times = self._resampled_pairs(export_vals, export_times)
                 prepared.append((export_vals, export_times))
 
+            max_len = max((len(vals) for vals, _ in prepared), default=0)
             for i in range(max_len):
                 row = []
                 t_val = ""
                 for _, times in prepared:
                     if i < len(times):
                         if is_datetime:
-                            t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                            t_val = self._format_export_time(times[i])
                         else:
                             t_val = str(int(times[i]))
                         break
@@ -722,6 +805,7 @@ class ConcentrationTab(QWidget):
                     *group_data.get(name, ([], [])),
                     export_range,
                 )
+                export_vals, export_times = self._resampled_pairs(export_vals, export_times)
                 prepared.append((name, export_vals, export_times))
 
             max_len = max((len(vals) for _, vals, _ in prepared), default=0)
@@ -731,7 +815,7 @@ class ConcentrationTab(QWidget):
                 for _, _, times in prepared:
                     if i < len(times):
                         if is_datetime:
-                            t_val = times[i].strftime("%Y-%m-%d %H:%M:%S")
+                            t_val = self._format_export_time(times[i])
                         else:
                             t_val = str(int(times[i]))
                         break
@@ -739,6 +823,38 @@ class ConcentrationTab(QWidget):
                 for _, vals, _ in prepared:
                     row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
                 writer.writerow(row)
+
+    def _resampled_pairs(
+        self,
+        vals: list[float],
+        times: list[object],
+    ) -> tuple[list[float], list[object]]:
+        if len(vals) < 2 or len(times) < 2 or not isinstance(times[0], datetime):
+            return vals, times
+
+        pairs = [(t.timestamp(), value) for value, t in zip(vals, times) if isinstance(t, datetime)]
+        x = np.asarray([pair[0] for pair in pairs], dtype=float)
+        y = np.asarray([pair[1] for pair in pairs], dtype=float)
+        if len(x) < 2:
+            return vals, times
+
+        unique_x, unique_indices = np.unique(x, return_index=True)
+        y = y[unique_indices]
+        if len(unique_x) < 2 or unique_x[-1] <= unique_x[0]:
+            return vals, times
+
+        step = 1.0 / self._export_sample_rate_hz
+        sample_count = int(np.floor((unique_x[-1] - unique_x[0]) / step)) + 1
+        target_x = unique_x[0] + np.arange(sample_count, dtype=float) * step
+        target_x = target_x[target_x <= unique_x[-1] + step * 1e-6]
+        interpolator = PchipInterpolator(unique_x, y, extrapolate=False)
+        target_y = np.asarray(interpolator(target_x), dtype=float)
+        target_times = [datetime.fromtimestamp(value) for value in target_x]
+        return target_y.tolist(), target_times
+
+    @staticmethod
+    def _format_export_time(value: datetime) -> str:
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
     @staticmethod
     def _filtered_pairs(vals: list[float], times: list[object],

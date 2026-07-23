@@ -23,6 +23,7 @@ class SmoothingProfile:
 
 PROFILES: dict[str, SmoothingProfile] = {
     "off": SmoothingProfile(False, 1.0, 1.0, 0.0, 0.0, 1),
+    "extra_smooth": SmoothingProfile(True, 0.10, 0.35, 0.12, 0.006, 7),
     "steady": SmoothingProfile(True, 0.18, 0.65, 0.10, 0.005, 3),
     "balanced": SmoothingProfile(True, 0.25, 0.75, 0.08, 0.003, 3),
     "responsive": SmoothingProfile(True, 0.40, 0.90, 0.05, 0.002, 3),

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 
-from ..camera import CameraInfo
+from ..camera_types import CameraInfo
 
 _GEAR_LABELS = {
     0: "高速 / High",

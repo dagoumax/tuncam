@@ -16,11 +16,11 @@ from ctypes import (
     pointer,
     string_at,
 )
-from dataclasses import dataclass
 
 import numpy as np
 
 from .debug_log import get_debug_logger
+from .camera_types import CameraInfo
 from .TUCam import (
     TUCAM_CAPTURE_MODES,
     TUCAM_FRAME,
@@ -63,29 +63,6 @@ from .TUCam import (
 
 
 log = get_debug_logger("camera")
-
-
-@dataclass
-class CameraInfo:
-    """Container for camera device information."""
-
-    model: str = ""
-    serial_number: str = ""
-    vendor_id: int = 0
-    product_id: int = 0
-    api_version: str = ""
-    firmware_version: str = ""
-    fpga_version: str = ""
-    driver_version: str = ""
-    sensor_width: int = 0
-    sensor_height: int = 0
-    channels: int = 0
-    bus_type: int = 0
-    fan_speed: int = 0
-    fpga_temperature: float = 0.0
-    pcba_temperature: float = 0.0
-    env_temperature: float = 0.0
-    transfer_rate: int = 0
 
 
 class CameraController:

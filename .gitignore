@@ -6,7 +6,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-logs/*.log
+logs/
 config/user_settings.json.tmp
 Dhyana*.xml
 

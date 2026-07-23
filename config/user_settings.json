@@ -7,45 +7,56 @@
     "working_mode": 0,
     "auto_save": false,
     "save_dir": "data",
-    "row_groups_text": "",
+    "row_groups_text": "890-930",
     "row_aggregation": "sum",
     "merge_factor": 1,
+    "detection_threshold_sigma": 3.0,
     "arpls_enabled": true,
     "arpls_mode": "corrected",
     "arpls_lam": 10000.0,
     "arpls_max_iter": 50,
     "arpls_tol": 1e-06,
-    "concentration_smoothing": "balanced",
-    "batch_interval_ms": 1000
+    "concentration_smoothing": "extra_smooth",
+    "batch_interval_ms": 1000,
+    "export_sample_rate_hz": 1,
+    "gas_emergency_stop": false
   },
   "gas_configs": [
     {
       "name": "O2",
       "position": 572,
       "window": 15,
-      "coefficient": 1.0,
-      "raman_shift": 1558.0
+      "coefficient": 0.8732,
+      "raman_shift": 1558.0,
+      "alarm_concentration": null,
+      "detection_sigma": 3.5
     },
     {
       "name": "N2",
       "position": 1015,
       "window": 15,
       "coefficient": 1.0,
-      "raman_shift": 2333.0
+      "raman_shift": 2333.0,
+      "alarm_concentration": null,
+      "detection_sigma": 4.0
     },
     {
       "name": "CO2",
       "position": 488,
       "window": 15,
       "coefficient": 1.0,
-      "raman_shift": 1387.0
+      "raman_shift": 1387.0,
+      "alarm_concentration": null,
+      "detection_sigma": 3.0
     },
     {
       "name": "halong",
       "position": 179,
       "window": 15,
-      "coefficient": 1.0,
-      "raman_shift": 753.6
+      "coefficient": 0.541,
+      "raman_shift": 753.6,
+      "alarm_concentration": null,
+      "detection_sigma": 2.0
     }
   ]
 }

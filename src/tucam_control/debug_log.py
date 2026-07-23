@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import faulthandler
 import logging
+import os
 import platform
 import sys
 from logging.handlers import RotatingFileHandler
@@ -27,7 +28,8 @@ def debug_log_path() -> Path:
 
 def app_log_path() -> Path:
     """Return the persistent application log path."""
-    return project_root() / "logs" / "tucam_control.log"
+    filename = os.environ.get("TUCAM_LOG_FILE", "tucam_control.log")
+    return project_root() / "logs" / filename
 
 
 def setup_app_logging() -> Path:

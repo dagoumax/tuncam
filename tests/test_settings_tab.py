@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from tucam_control.camera import CameraInfo
+from tucam_control.camera_types import CameraInfo
 from tucam_control.gas_analyzer import GasConfig
 from tucam_control.ui.settings_tab import DEFAULT_SAVE_DIR, SettingsTab
 
@@ -33,7 +33,10 @@ def test_settings_apply_emits_normalized_values() -> None:
     tab._save_dir_edit.setText("")
     tab._row_groups_edit.setText("1-10, 20-30")
     tab._merge_spin.setValue(2)
+    tab._threshold_sigma_spin.setValue(3.0)
     tab._smooth_combo.setCurrentIndex(0)
+    tab._export_sample_rate_spin.setValue(1000)
+    tab._gas_emergency_stop_cb.setChecked(True)
 
     tab._on_apply()
 
@@ -47,7 +50,10 @@ def test_settings_apply_emits_normalized_values() -> None:
     assert updates["row_groups_text"] == "1-10, 20-30"
     assert updates["row_aggregation"] == "sum"
     assert updates["merge_factor"] == 2
+    assert updates["detection_threshold_sigma"] == 3.0
     assert updates["concentration_smoothing"] == "off"
+    assert updates["export_sample_rate_hz"] == 1000
+    assert updates["gas_emergency_stop"] is True
     assert len(updates["gas_configs"]) >= 1
 
 
@@ -62,7 +68,7 @@ def test_device_status_hides_unsupported_zero_temperatures() -> None:
 def test_persisted_settings_populate_editable_controls() -> None:
     _app()
     tab = SettingsTab()
-    gases = [GasConfig("Test", 42, 8, 1.5, 123.0)]
+    gases = [GasConfig("Test", 42, 8, 1.5, 123.0, 12.5, 2.25)]
 
     tab.load_settings(
         {
@@ -72,6 +78,8 @@ def test_persisted_settings_populate_editable_controls() -> None:
             "row_groups_text": "10-20",
             "row_aggregation": "mean",
             "merge_factor": 4,
+            "detection_threshold_sigma": 1.75,
+            "gas_emergency_stop": True,
         },
         gases,
     )
@@ -82,4 +90,6 @@ def test_persisted_settings_populate_editable_controls() -> None:
     assert tab._row_groups_edit.text() == "10-20"
     assert tab._row_aggregation_combo.currentData() == "mean"
     assert tab._merge_spin.value() == 4
+    assert tab._threshold_sigma_spin.value() == 1.75
+    assert tab._gas_emergency_stop_cb.isChecked() is True
     assert tab._get_gas_configs() == gases

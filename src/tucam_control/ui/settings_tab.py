@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..camera import CameraController, CameraInfo
+from ..camera_process import ProcessCameraController
+from ..camera_types import CameraInfo
 from ..data_processor import DataProcessor
 from ..gas_analyzer import GasAnalyzer, GasConfig
 
@@ -111,12 +112,23 @@ class SettingsTab(QWidget):
         self._merge_spin.setToolTip("1 = 不合并, 2 = 每2列取平均, ...")
         proc_form.addRow("列合并因子 / Merge Factor:", self._merge_spin)
 
+        self._threshold_sigma_spin = QDoubleSpinBox()
+        self._threshold_sigma_spin.setRange(0.10, 10.00)
+        self._threshold_sigma_spin.setDecimals(2)
+        self._threshold_sigma_spin.setSingleStep(0.05)
+        self._threshold_sigma_spin.setValue(3.0)
+        self._threshold_sigma_spin.setToolTip(
+            "检出阈值 = 此系数 × 整条光谱的标准差；数值越低越容易检出弱峰。"
+        )
+        proc_form.addRow("检出阈值系数 / Detection Threshold:", self._threshold_sigma_spin)
+
         self._smooth_combo = QComboBox()
         self._smooth_combo.addItem("关闭 / Off", "off")
+        self._smooth_combo.addItem("更平滑 / Extra Smooth", "extra_smooth")
         self._smooth_combo.addItem("稳健 / Steady", "steady")
         self._smooth_combo.addItem("均衡 / Balanced (默认)", "balanced")
         self._smooth_combo.addItem("灵敏 / Responsive", "responsive")
-        self._smooth_combo.setCurrentIndex(2)
+        self._smooth_combo.setCurrentIndex(3)
         proc_form.addRow("浓度平滑 / Concentration Smoothing:", self._smooth_combo)
 
         self._batch_interval_spin = QSpinBox()
@@ -125,6 +137,15 @@ class SettingsTab(QWidget):
         self._batch_interval_spin.setValue(1000)
         self._batch_interval_spin.setSuffix(" ms")
         proc_form.addRow("批量测试间隔 / Batch Interval:", self._batch_interval_spin)
+
+        self._export_sample_rate_spin = QSpinBox()
+        self._export_sample_rate_spin.setRange(1, 1000)
+        self._export_sample_rate_spin.setValue(1000)
+        self._export_sample_rate_spin.setSuffix(" Hz")
+        proc_form.addRow("采样率 / Sample Rate:", self._export_sample_rate_spin)
+
+        self._gas_emergency_stop_cb = QCheckBox("气体急停 / Gas Emergency Stop")
+        proc_form.addRow("", self._gas_emergency_stop_cb)
 
         layout.addWidget(proc_gb)
 
@@ -169,8 +190,16 @@ class SettingsTab(QWidget):
         gas_layout = QVBoxLayout(gas_gb)
 
         self._gas_table = QTableWidget()
-        self._gas_table.setColumnCount(5)
-        self._gas_table.setHorizontalHeaderLabels(["名称 / Name", "位置 / Pos", "窗口 / Win", "系数 / Coeff", "拉曼位移 / Shift"])
+        self._gas_table.setColumnCount(7)
+        self._gas_table.setHorizontalHeaderLabels([
+            "名称 / Name",
+            "位置 / Pos",
+            "窗口 / Win",
+            "系数 / Coeff",
+            "拉曼位移 / Shift",
+            "报警浓度 (%) / Alarm Conc",
+            "检出阈值 / Detection Sigma",
+        ])
         self._gas_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._gas_table.setMinimumHeight(120)
         gas_layout.addWidget(self._gas_table)
@@ -221,10 +250,20 @@ class SettingsTab(QWidget):
     def _init_gas_table(self) -> None:
         configs = GasAnalyzer.default_gases()
         for cfg in configs:
-            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient, cfg.raman_shift)
+            self._add_gas_row(
+                cfg.name,
+                cfg.position,
+                cfg.window,
+                cfg.coefficient,
+                cfg.raman_shift,
+                cfg.alarm_concentration,
+                cfg.detection_sigma,
+            )
 
     def _add_gas_row(self, name: str = "", pos: int = 0, window: int = 15,
-                     coeff: float = 1.0, shift: float = 0.0) -> None:
+                     coeff: float = 1.0, shift: float = 0.0,
+                     alarm_concentration: float | None = None,
+                     detection_sigma: float | None = None) -> None:
         row = self._gas_table.rowCount()
         self._gas_table.insertRow(row)
         self._gas_table.setItem(row, 0, QTableWidgetItem(name))
@@ -232,24 +271,39 @@ class SettingsTab(QWidget):
         self._gas_table.setItem(row, 2, QTableWidgetItem(str(window)))
         self._gas_table.setItem(row, 3, QTableWidgetItem(str(coeff)))
         self._gas_table.setItem(row, 4, QTableWidgetItem(str(shift) if shift else ""))
+        self._gas_table.setItem(
+            row,
+            5,
+            QTableWidgetItem(
+                str(alarm_concentration) if alarm_concentration is not None else ""
+            ),
+        )
+        self._gas_table.setItem(
+            row, 6,
+            QTableWidgetItem(str(detection_sigma) if detection_sigma is not None else ""),
+        )
 
     def _get_gas_configs(self) -> list[GasConfig]:
         configs = []
         for row in range(self._gas_table.rowCount()):
             items = [
                 (self._gas_table.item(row, c).text().strip() if self._gas_table.item(row, c) else "")
-                for c in range(5)
+                for c in range(7)
             ]
             if not items[0]:
                 continue
             try:
                 shift_text = items[4].strip()
+                alarm_text = items[5].strip()
+                detection_text = items[6].strip()
                 configs.append(GasConfig(
                     name=items[0],
                     position=int(items[1]),
                     window=int(items[2]),
                     coefficient=float(items[3]),
                     raman_shift=float(shift_text) if shift_text else 0.0,
+                    alarm_concentration=float(alarm_text) if alarm_text else None,
+                    detection_sigma=float(detection_text) if detection_text else None,
                 ))
             except (ValueError, IndexError):
                 continue
@@ -258,7 +312,15 @@ class SettingsTab(QWidget):
     def update_gas_table(self, configs: list[GasConfig]) -> None:
         self._gas_table.setRowCount(0)
         for cfg in configs:
-            self._add_gas_row(cfg.name, cfg.position, cfg.window, cfg.coefficient, cfg.raman_shift)
+            self._add_gas_row(
+                cfg.name,
+                cfg.position,
+                cfg.window,
+                cfg.coefficient,
+                cfg.raman_shift,
+                cfg.alarm_concentration,
+                cfg.detection_sigma,
+            )
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value) -> None:
@@ -280,7 +342,14 @@ class SettingsTab(QWidget):
             settings.get("row_aggregation", DataProcessor.ROW_AGGREGATION_SUM),
         )
         self._merge_spin.setValue(int(settings.get("merge_factor", 1)))
+        self._threshold_sigma_spin.setValue(
+            float(settings.get("detection_threshold_sigma", 3.0))
+        )
         self._batch_interval_spin.setValue(int(settings.get("batch_interval_ms", 1000)))
+        self._export_sample_rate_spin.setValue(int(settings.get("export_sample_rate_hz", 1000)))
+        self._gas_emergency_stop_cb.setChecked(
+            bool(settings.get("gas_emergency_stop", False))
+        )
         self._select_combo_data(
             self._smooth_combo,
             settings.get("concentration_smoothing", "balanced"),
@@ -327,7 +396,7 @@ class SettingsTab(QWidget):
                 temp_parts.append(f"环境 {info.env_temperature:.1f} °C")
             self._status_temp.setText("  |  ".join(temp_parts) if temp_parts else "N/A")
 
-    def update_ranges(self, camera: CameraController) -> None:
+    def update_ranges(self, camera: ProcessCameraController) -> None:
         try:
             mn, mx = camera.get_exposure_range()
             self._exp_range_label.setText(f"{mn:.2f} – {mx:.2f} ms")
@@ -386,7 +455,10 @@ class SettingsTab(QWidget):
             "row_groups_text": raw_text,
             "row_aggregation": self._row_aggregation_combo.currentData(),
             "merge_factor": self._merge_spin.value(),
+            "detection_threshold_sigma": self._threshold_sigma_spin.value(),
             "batch_interval_ms": self._batch_interval_spin.value(),
+            "export_sample_rate_hz": self._export_sample_rate_spin.value(),
+            "gas_emergency_stop": self._gas_emergency_stop_cb.isChecked(),
             "concentration_smoothing": self._smooth_combo.currentData(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),
             "arpls_mode": self._arpls_mode_combo.currentData(),

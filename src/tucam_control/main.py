@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import ctypes
+import multiprocessing
 
 
 # ── Redirect C-level stderr (fd 2) to suppress libpng iCCP warnings ──
@@ -91,6 +92,7 @@ def _install_qt_message_handler() -> None:
 
 
 def main() -> None:
+    multiprocessing.freeze_support()
     log_path = setup_app_logging()
     log = get_app_logger("main")
     log.info("Application starting; log: %s", log_path)

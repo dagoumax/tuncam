@@ -33,6 +33,8 @@ def load_user_settings(path: Path | None = None) -> tuple[dict, list[GasConfig]]
         if not isinstance(row, dict):
             continue
         try:
+            alarm_value = row.get("alarm_concentration")
+            detection_value = row.get("detection_sigma")
             gases.append(
                 GasConfig(
                     name=str(row["name"]),
@@ -40,6 +42,14 @@ def load_user_settings(path: Path | None = None) -> tuple[dict, list[GasConfig]]
                     window=int(row.get("window", 15)),
                     coefficient=float(row.get("coefficient", 1.0)),
                     raman_shift=float(row.get("raman_shift", 0.0)),
+                    alarm_concentration=(
+                        float(alarm_value) if alarm_value not in (None, "") else None
+                    ),
+                    detection_sigma=(
+                        float(detection_value)
+                        if detection_value not in (None, "")
+                        else None
+                    ),
                 )
             )
         except (KeyError, TypeError, ValueError):

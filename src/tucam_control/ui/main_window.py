@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
 )
 
-from ..camera import CameraController
+from ..camera_process import ProcessCameraController
 from ..concentration_smoother import AdaptiveConcentrationSmoother
 from ..data_processor import DataProcessor
 from ..debug_log import get_debug_logger
@@ -43,13 +43,37 @@ class _ProcessingSignals(QObject):
     failed = Signal(str)
 
 
+class _ConnectionSignals(QObject):
+    finished = Signal(int, int)
+    failed = Signal(int, str)
+
+
+class _ConnectionTask(QRunnable):
+    def __init__(self, camera: ProcessCameraController, generation: int) -> None:
+        super().__init__()
+        self._camera = camera
+        self._generation = generation
+        self.signals = _ConnectionSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            count = self._camera.initialize()
+            if count > 0:
+                self._camera.open(0)
+            self.signals.finished.emit(self._generation, count)
+        except Exception as exc:
+            log.exception("Background camera connection failed")
+            self.signals.failed.emit(self._generation, str(exc))
+
+
 class _CaptureWorker(QObject):
     frame_ready = Signal(int, object)
     telemetry_ready = Signal(int, object)
     failed = Signal(int, str)
     finished = Signal(int)
 
-    def __init__(self, camera: CameraController, generation: int) -> None:
+    def __init__(self, camera: ProcessCameraController, generation: int) -> None:
         super().__init__()
         self._camera = camera
         self._generation = generation
@@ -142,6 +166,13 @@ class _ProcessingTask(QRunnable):
             analyzer = GasAnalyzer()
             analyzer.gases = self._gas_configs
             analyzer.merge_factor = processor.merge_factor
+            analyzer.threshold_sigma = self._settings.get(
+                "detection_threshold_sigma", 3.0
+            )
+            analyzer.baseline_corrected = bool(
+                self._settings.get("arpls_enabled", False)
+                and self._settings.get("arpls_mode", "raw") == DataProcessor.BASELINE_CORRECTED
+            )
 
             result = processor.process(self._frame)
             labels = [
@@ -176,7 +207,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Dhyana-95-V2 Camera Control")
         self.resize(1400, 900)
 
-        self._camera = CameraController()
+        self._camera = ProcessCameraController()
         self._processor = DataProcessor()
         self._analyzer = GasAnalyzer()
         self._analyzer.gases = GasAnalyzer.default_gases()
@@ -191,6 +222,7 @@ class MainWindow(QMainWindow):
             "row_groups_text": "",
             "row_aggregation": DataProcessor.ROW_AGGREGATION_SUM,
             "merge_factor": 1,
+            "detection_threshold_sigma": 3.0,
             "arpls_enabled": True,
             "arpls_mode": "corrected",
             "arpls_lam": 1e5,
@@ -198,6 +230,8 @@ class MainWindow(QMainWindow):
             "arpls_tol": 1e-6,
             "concentration_smoothing": "balanced",
             "batch_interval_ms": 1000,
+            "export_sample_rate_hz": 1000,
+            "gas_emergency_stop": False,
         }
         try:
             persisted_settings, persisted_gases = load_user_settings()
@@ -223,6 +257,7 @@ class MainWindow(QMainWindow):
                 self._settings["row_aggregation"] = DataProcessor.ROW_AGGREGATION_SUM
             if persisted_gases:
                 self._analyzer.gases = persisted_gases
+            self._analyzer.threshold_sigma = self._settings["detection_threshold_sigma"]
             log.info("Loaded user settings: keys=%s gases=%s", sorted(persisted_settings), len(persisted_gases))
         except Exception as exc:
             log.warning("Could not load user settings; defaults will be used: %s", exc)
@@ -238,10 +273,14 @@ class MainWindow(QMainWindow):
         self._processing_durations_ms: deque[float] = deque(maxlen=30)
         self._dropped_pending_frames = 0
         self._auto_save_error_reported = False
+        self._gas_alarm_stopped = False
         self._capture_thread: QThread | None = None
         self._capture_worker: _CaptureWorker | None = None
         self._capture_generation = 0
         self._capture_stopping = False
+        self._connecting = False
+        self._connection_generation = 0
+        self._connection_task: _ConnectionTask | None = None
         self._diagnostics: dict = {
             "connection": "未连接 / Disconnected",
             "frame_count": 0,
@@ -269,7 +308,9 @@ class MainWindow(QMainWindow):
         self._processing_pool.setMaxThreadCount(1)
 
         self._setup_ui()
+        self._configure_concentration_smoothing()
         self._settings_tab.load_settings(self._settings, self._analyzer.gases)
+        self._conc_tab.set_export_sample_rate_hz(self._settings["export_sample_rate_hz"])
         self._connect_signals()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(1000)
@@ -317,18 +358,53 @@ class MainWindow(QMainWindow):
         self._acq_tab.batch_stop_requested.connect(self._on_batch_stop)
 
         self._settings_tab.settings_changed.connect(self._on_settings_changed)
+        self._conc_tab.emergency_stop_requested.connect(self._on_emergency_stop)
 
         self._acq_tab.frame_ready.connect(self._on_frame_ready)
         self._data_tab.calibration_changed.connect(self._on_calibration_changed)
+
+    def _configure_concentration_smoothing(self) -> str:
+        """Apply the persisted smoothing profile to runtime and export behavior."""
+        requested = str(self._settings.get("concentration_smoothing", "balanced"))
+        self._concentration_smoother.set_profile(requested)
+        applied = self._concentration_smoother.profile_name
+        self._settings["concentration_smoothing"] = applied
+        export_smoothed = applied != "off"
+        self._conc_tab.set_export_smoothed(export_smoothed)
+        log.info(
+            "Concentration smoothing configured: requested=%s applied=%s export_smoothed=%s",
+            requested,
+            applied,
+            export_smoothed,
+        )
+        return applied
 
     # ------------------------------------------------------------------
     # Camera management
     # ------------------------------------------------------------------
 
     def _try_connect(self) -> None:
+        if self._connecting:
+            return
+        log.info("Trying to connect camera in SDK process")
+        self._connecting = True
+        self._connection_generation += 1
+        generation = self._connection_generation
+        self._update_diagnostics(connection="正在连接 / Connecting")
+        task = _ConnectionTask(self._camera, generation)
+        task.signals.finished.connect(self._on_connection_finished)
+        task.signals.failed.connect(self._on_connection_failed)
+        self._connection_task = task
+        QThreadPool.globalInstance().start(task)
+
+    @Slot(int, int)
+    def _on_connection_finished(self, generation: int, count: int) -> None:
+        if generation != self._connection_generation:
+            log.info("Ignoring stale connection success generation=%s", generation)
+            return
+        self._connecting = False
+        self._connection_task = None
         try:
-            log.info("Trying to connect camera")
-            count = self._camera.initialize()
             log.info("Camera initialize finished; count=%s", count)
             if count == 0:
                 log.warning("No camera detected after TUCAM_Api_Init")
@@ -347,7 +423,6 @@ class MainWindow(QMainWindow):
                 )
                 self._was_connected = False
                 return
-            self._camera.open(0)
             self._apply_current_settings()
             info = self._camera.get_device_info()
             self._acq_tab.show_device_info(info)
@@ -371,19 +446,28 @@ class MainWindow(QMainWindow):
             self._was_connected = True
             self._disconnect_warned = False
         except Exception as exc:
-            log.exception("Camera connection failed")
-            self.status_changed.emit(f"连接失败 / Connection failed: {exc}")
-            QMessageBox.critical(
-                self,
-                "连接失败 / Connection Failed",
-                f"无法打开相机：\n{exc}\n\n"
-                "请检查相机连接后点击「重新连接」。\n"
-                "也可以点击「载入TIF」使用测试图片。",
-            )
-            self._settings_tab.update_device_status(None)
-            self._set_diagnostic_error("connection", f"连接失败: {exc}")
-            self._update_diagnostics(connection=f"连接失败 / Failed: {exc}")
-            self._was_connected = False
+            self._on_connection_failed(generation, str(exc))
+
+    @Slot(int, str)
+    def _on_connection_failed(self, generation: int, message: str) -> None:
+        if generation != self._connection_generation:
+            log.info("Ignoring stale connection failure generation=%s: %s", generation, message)
+            return
+        self._connecting = False
+        self._connection_task = None
+        log.error("Camera connection failed: %s", message)
+        self.status_changed.emit(f"连接失败 / Connection failed: {message}")
+        QMessageBox.critical(
+            self,
+            "连接失败 / Connection Failed",
+            f"无法打开相机：\n{message}\n\n"
+            "SDK 子进程已自动终止，可以检查设备后重新连接。\n"
+            "也可以点击「载入TIF」使用测试图片。",
+        )
+        self._settings_tab.update_device_status(None)
+        self._set_diagnostic_error("connection", f"连接失败: {message}")
+        self._update_diagnostics(connection=f"连接失败 / Failed: {message}")
+        self._was_connected = False
 
     def _apply_current_settings(self) -> None:
         s = self._settings
@@ -449,6 +533,9 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_reconnect(self) -> None:
         log.info("Reconnect requested")
+        self._connection_generation += 1
+        self._camera.force_terminate("reconnect requested")
+        self._connecting = False
         self._update_diagnostics(connection="正在重新连接 / Reconnecting")
         if not self._stop_continuous_capture("reconnect"):
             QMessageBox.warning(
@@ -468,7 +555,7 @@ class MainWindow(QMainWindow):
             log.warning("Failed to uninitialize camera before reconnect: %s", exc)
 
         self._disconnect_warned = False
-        self._try_connect()
+        QTimer.singleShot(150, self._try_connect)
 
     # ------------------------------------------------------------------
     # TIF loading (test mode)
@@ -704,6 +791,7 @@ class MainWindow(QMainWindow):
             return
         try:
             log.info("Continuous capture requested")
+            self._gas_alarm_stopped = False
             self._camera.start_capture()
             self._start_capture_worker()
             self._acq_tab.set_capturing_state(True)
@@ -726,6 +814,15 @@ class MainWindow(QMainWindow):
         self._stop_continuous_capture("user request")
         self._acq_tab.set_capturing_state(False)
         self.status_changed.emit("采集已停止 / Capture stopped")
+
+    @Slot()
+    def _on_emergency_stop(self) -> None:
+        log.warning("Manual emergency stop requested")
+        self._batch_timer.stop()
+        self._acq_tab.set_batch_state(False)
+        self._stop_continuous_capture("manual emergency stop")
+        self._acq_tab.set_capturing_state(False)
+        self.status_changed.emit("急停：采集已停止 / Emergency stop: capture stopped")
 
     @Slot()
     def _on_save(self) -> None:
@@ -944,9 +1041,13 @@ class MainWindow(QMainWindow):
         old_gas_signature = self._gas_signature(self._analyzer.gases)
         new_gas_signature = self._gas_signature(updates.get("gas_configs", self._analyzer.gases))
         old_smoothing = self._settings.get("concentration_smoothing", "balanced")
+        old_threshold_sigma = self._settings.get("detection_threshold_sigma", 3.0)
 
         self._settings.update({key: value for key, value in updates.items() if key != "gas_configs"})
         self._batch_timer.setInterval(self._settings.get("batch_interval_ms", 1000))
+        self._conc_tab.set_export_sample_rate_hz(
+            self._settings.get("export_sample_rate_hz", 1000)
+        )
         self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
         self._processing_generation += 1
         if self._camera.is_open:
@@ -989,15 +1090,22 @@ class MainWindow(QMainWindow):
         if gas_configs is not None:
             self._analyzer.gases = gas_configs
         self._analyzer.merge_factor = self._settings.get("merge_factor", 1)
-        new_smoothing = self._settings.get("concentration_smoothing", "balanced")
-        self._concentration_smoother.set_profile(new_smoothing)
-        self._conc_tab.set_export_smoothed(new_smoothing != "off")
+        self._analyzer.threshold_sigma = self._settings.get(
+            "detection_threshold_sigma", 3.0
+        )
+        new_smoothing = self._configure_concentration_smoothing()
 
-        if old_gas_signature != new_gas_signature:
+        new_threshold_sigma = self._settings.get("detection_threshold_sigma", 3.0)
+        if (
+            old_gas_signature != new_gas_signature
+            or old_threshold_sigma != new_threshold_sigma
+        ):
             log.info(
-                "Gas configuration changed; clearing concentration history: old=%s new=%s",
+                "Gas detection configuration changed; clearing concentration history: "
+                "old=%s new=%s threshold=%.2f",
                 old_gas_signature,
                 new_gas_signature,
+                new_threshold_sigma,
             )
             self._concentration_smoother.reset()
             self._conc_tab.clear_history()
@@ -1095,6 +1203,7 @@ class MainWindow(QMainWindow):
             self._data_tab.set_baseline_data(payload["baseline"])
 
             self._conc_tab.set_gas_names(payload["gas_names"])
+            alarm_triggered = False
             if payload["all_results"]:
                 display_results = self._concentration_smoother.smooth_groups(
                     payload["all_results"],
@@ -1107,6 +1216,11 @@ class MainWindow(QMainWindow):
                     mode=payload["mode"],
                     raw_group_results=payload["all_results"],
                 )
+                alarm_triggered = self._check_smoothed_gas_alarm(
+                    display_results,
+                    payload["labels"],
+                    payload["mode"],
+                )
             log.info(
                 "Processing finished: duration_ms=%.1f result_shape=%s labels=%s mode=%s",
                 payload["duration_ms"],
@@ -1114,10 +1228,60 @@ class MainWindow(QMainWindow):
                 payload["labels"],
                 payload["mode"],
             )
-            self.status_changed.emit(
-                f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
-            )
+            if not alarm_triggered:
+                self.status_changed.emit(
+                    f"处理完成 / Processed: {payload['duration_ms']:.0f} ms"
+                )
         self._start_pending_processing()
+
+    def _check_smoothed_gas_alarm(
+        self,
+        group_results: list[list],
+        group_labels: list[str],
+        mode: str,
+    ) -> bool:
+        if (
+            not self._settings.get("gas_emergency_stop", False)
+            or mode != "time"
+            or not self._camera.is_capturing
+            or self._gas_alarm_stopped
+        ):
+            return False
+
+        thresholds = {
+            cfg.name: cfg.alarm_concentration
+            for cfg in self._analyzer.gases
+            if cfg.alarm_concentration is not None
+        }
+        for group_index, results in enumerate(group_results):
+            group_label = (
+                group_labels[group_index]
+                if group_index < len(group_labels)
+                else f"Group {group_index + 1}"
+            )
+            for result in results:
+                threshold = thresholds.get(result.name)
+                concentration = float(result.concentration) * 100.0
+                if threshold is None or concentration < threshold:
+                    continue
+                self._gas_alarm_stopped = True
+                self._pending_frame = None
+                log.warning(
+                    "Smoothed gas alarm reached: group=%s gas=%s "
+                    "concentration=%.4f%% threshold=%.4f%%",
+                    group_label,
+                    result.name,
+                    concentration,
+                    threshold,
+                )
+                self._stop_continuous_capture("smoothed gas concentration alarm")
+                self._acq_tab.set_capturing_state(False)
+                self.status_changed.emit(
+                    f"{result.name} 达到报警浓度，采集已停止 / "
+                    f"Alarm reached in {group_label}; capture stopped"
+                )
+                return True
+        return False
 
     @staticmethod
     def _gas_signature(configs: list) -> tuple:
@@ -1128,6 +1292,12 @@ class MainWindow(QMainWindow):
                 int(cfg.window),
                 round(float(cfg.coefficient), 12),
                 round(float(cfg.raman_shift), 6),
+                None if cfg.alarm_concentration is None else round(
+                    float(cfg.alarm_concentration), 6
+                ),
+                None if cfg.detection_sigma is None else round(
+                    float(cfg.detection_sigma), 6
+                ),
             )
             for cfg in configs
         )
@@ -1235,6 +1405,10 @@ class MainWindow(QMainWindow):
         log.info("Application window closing")
         self._refresh_timer.stop()
         self._batch_timer.stop()
+        if self._connecting:
+            self._connection_generation += 1
+            self._camera.force_terminate("application closed during connection")
+            self._connecting = False
         if not self._stop_continuous_capture("application close"):
             self._refresh_timer.start()
             event.ignore()

@@ -5,13 +5,20 @@ Loads TUCam.dll from the project's lib/x64/ directory.
 """
 
 import os
+import sys
 from pathlib import Path
 from ctypes import *
 from enum import Enum
 
+from .resources import project_root
+
 # Locate DLLs relative to this file
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _PACKAGE_DIR.parents[1]
+_PROJECT_ROOT = (
+    Path(sys._MEIPASS)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+    else project_root()
+)
 _DLL_DIR = _PROJECT_ROOT / "lib" / "x64"
 _DLL_PATH = _DLL_DIR / "TUCam.dll"
 _DLL_DEPENDENCY_NAMES = (

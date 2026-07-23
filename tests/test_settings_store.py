@@ -11,7 +11,7 @@ def test_settings_round_trip(tmp_path) -> None:
         "row_aggregation": "sum",
         "exposure_time_ms": 1000.0,
     }
-    gases = [GasConfig("O2", 123, 10, 2.5, 1555.0)]
+    gases = [GasConfig("O2", 123, 10, 2.5, 1555.0, 25.0, 3.5)]
 
     saved_path = save_user_settings(settings, gases, path)
     loaded_settings, loaded_gases = load_user_settings(path)

@@ -19,6 +19,8 @@ class GasConfig:
     window: int = 15            # search window (± columns)
     coefficient: float = 1.0    # calibration coefficient
     raman_shift: float = 0.0    # reference Raman shift (cm⁻¹), 0 = unknown
+    alarm_concentration: float | None = None  # alarm threshold in percent
+    detection_sigma: float | None = None  # per-gas detection multiplier
 
 
 def _local_baseline(spectrum: np.ndarray, center: int, window: int) -> float:
@@ -55,6 +57,35 @@ def find_peak(spectrum: np.ndarray, center: int, window: int) -> tuple[int, floa
     return peak_col, peak_height, peak_area
 
 
+def estimate_noise_sigma(
+    spectrum: np.ndarray,
+    gas_configs: list[GasConfig],
+    merge_factor: int = 1,
+) -> float:
+    """Estimate noise with MAD after excluding all configured gas windows."""
+    if spectrum.size == 0:
+        return 0.0
+    mask = np.ones(spectrum.size, dtype=bool)
+    factor = max(1, int(merge_factor))
+    for config in gas_configs:
+        center = config.position // factor
+        window = max(1, config.window // factor)
+        lo = max(0, center - window)
+        hi = min(spectrum.size, center + window + 1)
+        if lo < hi:
+            mask[lo:hi] = False
+
+    noise = spectrum[mask]
+    minimum_samples = min(spectrum.size, max(16, spectrum.size // 4))
+    if noise.size < minimum_samples:
+        noise = spectrum
+    median = float(np.median(noise))
+    mad = float(np.median(np.abs(noise - median)))
+    if mad > 0.0:
+        return 1.4826 * mad
+    return float(np.std(noise - median))
+
+
 @dataclass
 class GasResult:
     """Analysis result for a single gas."""
@@ -68,6 +99,44 @@ class GasResult:
     component: float       # peak_height × coefficient
     concentration: float = 0.0   # fraction of total
     detected: bool = True
+
+
+HALON_NAMES = {"halon", "halong", "哈龙"}
+HALON_CORRECTION_MEASURED = np.asarray([0.0, 3.0, 5.4, 6.5, 10.0, 20.0])
+HALON_CORRECTION_ACTUAL = np.asarray([0.0, 2.0, 5.0, 6.0, 10.0, 20.0])
+
+
+def correct_halon_percentage(measured_percent: float) -> float:
+    """Apply the empirical Halon calibration curve in percentage units."""
+    measured = float(np.clip(measured_percent, 0.0, 100.0))
+    if measured >= HALON_CORRECTION_MEASURED[-1]:
+        return measured
+    return float(np.interp(
+        measured,
+        HALON_CORRECTION_MEASURED,
+        HALON_CORRECTION_ACTUAL,
+    ))
+
+
+def apply_halon_concentration_correction(results: list[GasResult]) -> None:
+    """Correct Halon and rescale other gases proportionally to keep 100%."""
+    halon = next(
+        (result for result in results if result.name.strip().casefold() in HALON_NAMES),
+        None,
+    )
+    if halon is None:
+        return
+
+    corrected = correct_halon_percentage(halon.concentration * 100.0) / 100.0
+    corrected = float(np.clip(corrected, 0.0, 1.0))
+    other_total = sum(result.concentration for result in results if result is not halon)
+    halon.concentration = corrected
+    if other_total <= 0.0:
+        return
+    scale = max(0.0, 1.0 - corrected) / other_total
+    for result in results:
+        if result is not halon:
+            result.concentration *= scale
 
 
 class GasAnalyzer:
@@ -89,8 +158,10 @@ class GasAnalyzer:
 
     def __init__(self) -> None:
         self._gases: list[GasConfig] = []
-        self._threshold_sigma: float = 2.0
+        self._threshold_sigma: float = 3.0
         self._merge_factor: int = 1
+        self._baseline_corrected: bool = False
+        self._last_noise_sigma: float = 0.0
         self._last_results: list[GasResult] = []
 
     @property
@@ -107,7 +178,7 @@ class GasAnalyzer:
 
     @threshold_sigma.setter
     def threshold_sigma(self, v: float) -> None:
-        self._threshold_sigma = v
+        self._threshold_sigma = max(0.01, float(v))
 
     @property
     def merge_factor(self) -> int:
@@ -118,8 +189,20 @@ class GasAnalyzer:
         self._merge_factor = max(1, n)
 
     @property
+    def baseline_corrected(self) -> bool:
+        return self._baseline_corrected
+
+    @baseline_corrected.setter
+    def baseline_corrected(self, value: bool) -> None:
+        self._baseline_corrected = bool(value)
+
+    @property
     def last_results(self) -> list[GasResult]:
         return self._last_results
+
+    @property
+    def last_noise_sigma(self) -> float:
+        return self._last_noise_sigma
 
     # ------------------------------------------------------------------
     # Analysis
@@ -135,8 +218,8 @@ class GasAnalyzer:
             return []
 
         factor = self._merge_factor
-        noise_std = float(np.std(spectrum))
-        threshold = self._threshold_sigma * noise_std
+        noise_std = estimate_noise_sigma(spectrum, self._gases, factor)
+        self._last_noise_sigma = noise_std
 
         results: list[GasResult] = []
         total_component = 0.0
@@ -145,9 +228,22 @@ class GasAnalyzer:
             scaled_pos = cfg.position // factor
             scaled_win = max(1, cfg.window // factor)
             col, height, area = find_peak(spectrum, scaled_pos, scaled_win)
-            local_bl = _local_baseline(spectrum, scaled_pos, scaled_win)
-            net_height = height - local_bl
+            if self._baseline_corrected:
+                local_bl = 0.0
+                net_height = max(0.0, height)
+                lo = max(0, min(scaled_pos - scaled_win, len(spectrum) - 1))
+                hi = min(len(spectrum), scaled_pos + scaled_win + 1)
+                area = float(np.sum(np.clip(spectrum[lo:hi], 0, None)))
+            else:
+                local_bl = _local_baseline(spectrum, scaled_pos, scaled_win)
+                net_height = height - local_bl
 
+            detection_sigma = (
+                cfg.detection_sigma
+                if cfg.detection_sigma is not None
+                else self._threshold_sigma
+            )
+            threshold = max(0.01, float(detection_sigma)) * noise_std
             detected = net_height > threshold
             if not detected:
                 height = local_bl
@@ -175,6 +271,8 @@ class GasAnalyzer:
             for r in results:
                 r.concentration = 0.0
 
+        apply_halon_concentration_correction(results)
+
         self._last_results = results
         return results
 
@@ -190,7 +288,7 @@ class GasAnalyzer:
     def default_gases() -> list[GasConfig]:
         """Return the default gas configuration for Dhyana-95-V2."""
         return [
-            GasConfig("O2", 572, 15, 1.0, raman_shift=1558),
-            GasConfig("N2", 1015, 15, 1.0, raman_shift=2333),
-            GasConfig("CO2", 488, 15, 1.0, raman_shift=1387),
+            GasConfig("O2", 572, 15, 1.0, raman_shift=1558, detection_sigma=3.5),
+            GasConfig("N2", 1015, 15, 1.0, raman_shift=2333, detection_sigma=4.0),
+            GasConfig("CO2", 488, 15, 1.0, raman_shift=1387, detection_sigma=3.0),
         ]
