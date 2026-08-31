@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal, Slot
+import ipaddress
+
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -22,8 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +33,13 @@ from ..camera_process import ProcessCameraController
 from ..camera_types import CameraInfo
 from ..data_processor import DataProcessor
 from ..gas_analyzer import GasAnalyzer, GasConfig
+from ..row_groups import (
+    MAX_ROW_GROUPS,
+    describe_row_groups,
+    normalize_row_group_names,
+)
+from ..remote_server import generate_remote_token
+from .table_models import TableDataModel
 
 
 DEFAULT_SAVE_DIR = "data"
@@ -44,6 +52,8 @@ class SettingsTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._row_groups: list[tuple[int, int]] = []
+        self._row_group_names: dict[str, str] = {}
         self._setup_ui()
         self._init_gas_table()
 
@@ -69,7 +79,7 @@ class SettingsTab(QWidget):
                 padding: 0 5px;
             }
             SettingsTab QLabel, SettingsTab QCheckBox { font-size: 14px; }
-            SettingsTab QLineEdit, SettingsTab QComboBox,
+            SettingsTab QLineEdit, SettingsTab QPlainTextEdit, SettingsTab QComboBox,
             SettingsTab QSpinBox, SettingsTab QDoubleSpinBox {
                 min-height: 32px;
                 font-size: 14px;
@@ -80,7 +90,7 @@ class SettingsTab(QWidget):
                 font-size: 14px;
                 padding: 3px 12px;
             }
-            SettingsTab QTableWidget { font-size: 14px; }
+            SettingsTab QTableView { font-size: 14px; }
             SettingsTab QHeaderView::section {
                 min-height: 30px;
                 font-size: 13px;
@@ -159,9 +169,17 @@ class SettingsTab(QWidget):
         proc_gb = QGroupBox("数据处理 / Data Processing")
         proc_form = QFormLayout(proc_gb)
 
-        self._row_groups_edit = QLineEdit()
-        self._row_groups_edit.setPlaceholderText("e.g. 1-40, 91-130, 200-250")
-        proc_form.addRow("行分组 / Row Groups:", self._row_groups_edit)
+        row_group_controls = QHBoxLayout()
+        self._row_groups_summary = QLineEdit()
+        self._row_groups_summary.setReadOnly(True)
+        self._row_groups_summary.setPlaceholderText("未配置，使用全部图像")
+        self._manage_row_groups_button = QPushButton("管理行组...")
+        self._manage_row_groups_button.clicked.connect(
+            self._open_row_group_manager
+        )
+        row_group_controls.addWidget(self._row_groups_summary, 1)
+        row_group_controls.addWidget(self._manage_row_groups_button)
+        proc_form.addRow("行组配置 / Row Groups:", row_group_controls)
 
         self._row_aggregation_combo = QComboBox()
         self._row_aggregation_combo.addItem("求和 / Sum (默认)", DataProcessor.ROW_AGGREGATION_SUM)
@@ -207,6 +225,25 @@ class SettingsTab(QWidget):
         self._export_sample_rate_spin.setSuffix(" Hz")
         proc_form.addRow("采样率 / Sample Rate:", self._export_sample_rate_spin)
 
+        self._plot_opengl_cb = QCheckBox(
+            "启用 OpenGL 绘图加速 / Enable OpenGL Rendering"
+        )
+        self._plot_opengl_cb.setChecked(True)
+        self._plot_opengl_cb.setToolTip(
+            "使用显卡加速拉曼和浓度曲线；如果驱动或远程桌面不兼容，"
+            "程序会自动切回软件绘制。"
+        )
+        proc_form.addRow("绘图加速 / Plot Acceleration:", self._plot_opengl_cb)
+
+        self._show_plot_fps_cb = QCheckBox(
+            "显示实时绘图帧率 / Show Plot FPS"
+        )
+        self._show_plot_fps_cb.setChecked(False)
+        self._show_plot_fps_cb.setToolTip(
+            "在拉曼图和浓度图左上角显示最近一秒的实际绘图刷新率。"
+        )
+        proc_form.addRow("帧率显示 / FPS Display:", self._show_plot_fps_cb)
+
         settings_layout.addWidget(proc_gb, 0, 1)
 
         # ---- arPLS baseline correction ----
@@ -249,9 +286,8 @@ class SettingsTab(QWidget):
         gas_gb = QGroupBox("气体配置 / Gas Configuration")
         gas_layout = QVBoxLayout(gas_gb)
 
-        self._gas_table = QTableWidget()
-        self._gas_table.setColumnCount(7)
-        self._gas_table.setHorizontalHeaderLabels([
+        self._gas_table = QTableView()
+        self._gas_model = TableDataModel([
             "名称 / Name",
             "位置 / Pos",
             "窗口 / Win",
@@ -259,7 +295,8 @@ class SettingsTab(QWidget):
             "拉曼位移 / Shift",
             "报警浓度 (%) / Alarm Conc",
             "检出阈值 / Detection Sigma",
-        ])
+        ], editable_columns=range(7), parent=self._gas_table)
+        self._gas_table.setModel(self._gas_model)
         gas_header = self._gas_table.horizontalHeader()
         gas_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         gas_header.setMinimumSectionSize(90)
@@ -300,10 +337,46 @@ class SettingsTab(QWidget):
         info_form.addRow("曝光范围 / Exposure Range:", self._exp_range_label)
         info_form.addRow("温度范围 / Temperature Range:", self._temp_range_label)
         device_column_layout.addWidget(info_gb)
+
+        # ---- Offline LAN remote access ----
+        remote_gb = QGroupBox("局域网远程控制 / LAN Remote Control")
+        remote_form = QFormLayout(remote_gb)
+        self._remote_enabled_cb = QCheckBox("允许远程查看和控制 / Enable Remote Access")
+        remote_form.addRow("", self._remote_enabled_cb)
+
+        self._remote_port_spin = QSpinBox()
+        self._remote_port_spin.setRange(1024, 65535)
+        self._remote_port_spin.setValue(8765)
+        remote_form.addRow("服务端口 / Port:", self._remote_port_spin)
+
+        self._remote_allowed_ip_edit = QLineEdit()
+        self._remote_allowed_ip_edit.setPlaceholderText("例如 192.168.50.3；留空允许局域网内任意电脑")
+        remote_form.addRow("控制室 IP / Allowed IP:", self._remote_allowed_ip_edit)
+
+        token_row = QHBoxLayout()
+        self._remote_token_edit = QLineEdit(generate_remote_token())
+        self._remote_token_edit.setMaxLength(128)
+        self._remote_token_edit.setToolTip("控制室浏览器首次连接时需要输入此密钥。")
+        self._remote_token_generate_button = QPushButton("重新生成")
+        self._remote_token_generate_button.clicked.connect(
+            lambda: self._remote_token_edit.setText(generate_remote_token())
+        )
+        token_row.addWidget(self._remote_token_edit, 1)
+        token_row.addWidget(self._remote_token_generate_button)
+        remote_form.addRow("访问密钥 / Access Key:", token_row)
+
+        self._remote_status_label = QLabel("未启用 / Disabled")
+        self._remote_status_label.setWordWrap(True)
+        self._remote_status_label.setTextInteractionFlags(
+            self._remote_status_label.textInteractionFlags()
+            | Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        remote_form.addRow("运行状态 / Status:", self._remote_status_label)
+        device_column_layout.addWidget(remote_gb)
         device_column_layout.addStretch()
         settings_layout.addWidget(device_column, 1, 1)
 
-        for form in (cam_form, proc_form, arpls_form, status_layout, info_form):
+        for form in (cam_form, proc_form, arpls_form, status_layout, info_form, remote_form):
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             form.setHorizontalSpacing(12)
             form.setVerticalSpacing(10)
@@ -367,32 +440,22 @@ class SettingsTab(QWidget):
                      coeff: float = 1.0, shift: float = 0.0,
                      alarm_concentration: float | None = None,
                      detection_sigma: float | None = None) -> None:
-        row = self._gas_table.rowCount()
-        self._gas_table.insertRow(row)
-        self._gas_table.setItem(row, 0, QTableWidgetItem(name))
-        self._gas_table.setItem(row, 1, QTableWidgetItem(str(pos)))
-        self._gas_table.setItem(row, 2, QTableWidgetItem(str(window)))
-        self._gas_table.setItem(row, 3, QTableWidgetItem(str(coeff)))
-        self._gas_table.setItem(row, 4, QTableWidgetItem(str(shift) if shift else ""))
-        self._gas_table.setItem(
-            row,
-            5,
-            QTableWidgetItem(
-                str(alarm_concentration) if alarm_concentration is not None else ""
-            ),
-        )
-        self._gas_table.setItem(
-            row, 6,
-            QTableWidgetItem(str(detection_sigma) if detection_sigma is not None else ""),
+        self._gas_model.append_row(
+            (
+                name,
+                pos,
+                window,
+                coeff,
+                shift if shift else "",
+                alarm_concentration if alarm_concentration is not None else "",
+                detection_sigma if detection_sigma is not None else "",
+            )
         )
 
     def _get_gas_configs(self) -> list[GasConfig]:
         configs = []
-        for row in range(self._gas_table.rowCount()):
-            items = [
-                (self._gas_table.item(row, c).text().strip() if self._gas_table.item(row, c) else "")
-                for c in range(7)
-            ]
+        for items in self._gas_model.rows():
+            items = [value.strip() for value in items]
             if not items[0]:
                 continue
             try:
@@ -413,17 +476,18 @@ class SettingsTab(QWidget):
         return configs
 
     def update_gas_table(self, configs: list[GasConfig]) -> None:
-        self._gas_table.setRowCount(0)
-        for cfg in configs:
-            self._add_gas_row(
+        self._gas_model.replace_rows([
+            (
                 cfg.name,
                 cfg.position,
                 cfg.window,
                 cfg.coefficient,
-                cfg.raman_shift,
-                cfg.alarm_concentration,
-                cfg.detection_sigma,
+                cfg.raman_shift if cfg.raman_shift else "",
+                cfg.alarm_concentration if cfg.alarm_concentration is not None else "",
+                cfg.detection_sigma if cfg.detection_sigma is not None else "",
             )
+            for cfg in configs
+        ])
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value) -> None:
@@ -439,7 +503,16 @@ class SettingsTab(QWidget):
         self._select_combo_data(self._mode_combo, settings.get("working_mode", 0))
         self._auto_save_cb.setChecked(bool(settings.get("auto_save", False)))
         self._save_dir_edit.setText(str(settings.get("save_dir", DEFAULT_SAVE_DIR)))
-        self._row_groups_edit.setText(str(settings.get("row_groups_text", "")))
+        try:
+            groups = DataProcessor.parse_groups(
+                str(settings.get("row_groups_text", ""))
+            )
+        except ValueError:
+            groups = []
+        self._set_row_groups(
+            groups,
+            normalize_row_group_names(settings.get("row_group_names", {})),
+        )
         self._select_combo_data(
             self._row_aggregation_combo,
             settings.get("row_aggregation", DataProcessor.ROW_AGGREGATION_SUM),
@@ -450,6 +523,22 @@ class SettingsTab(QWidget):
         )
         self._batch_interval_spin.setValue(int(settings.get("batch_interval_ms", 1000)))
         self._export_sample_rate_spin.setValue(int(settings.get("export_sample_rate_hz", 1000)))
+        self._plot_opengl_cb.setChecked(
+            bool(settings.get("plot_opengl_enabled", True))
+        )
+        self._show_plot_fps_cb.setChecked(
+            bool(settings.get("show_plot_fps", False))
+        )
+        self._remote_enabled_cb.setChecked(
+            bool(settings.get("remote_enabled", False))
+        )
+        self._remote_port_spin.setValue(int(settings.get("remote_port", 8765)))
+        self._remote_allowed_ip_edit.setText(
+            str(settings.get("remote_allowed_ip", ""))
+        )
+        remote_token = str(settings.get("remote_token", "")).strip()
+        if remote_token:
+            self._remote_token_edit.setText(remote_token)
         self._select_combo_data(
             self._smooth_combo,
             settings.get("concentration_smoothing", "balanced"),
@@ -462,13 +551,22 @@ class SettingsTab(QWidget):
         if gas_configs:
             self.update_gas_table(gas_configs)
 
+    def load_plot_opengl_enabled(self, enabled: bool) -> None:
+        self._plot_opengl_cb.setChecked(bool(enabled))
+
+    def update_remote_status(self, message: str, ok: bool = False) -> None:
+        self._remote_status_label.setText(str(message))
+        self._remote_status_label.setStyleSheet(
+            "color: #176b3a;" if ok else "color: #8a3030;"
+        )
+
     def _on_add_gas(self) -> None:
         self._add_gas_row("New", 0, 15, 1.0, 0.0)
 
     def _on_del_gas(self) -> None:
-        row = self._gas_table.currentRow()
+        row = self._gas_table.currentIndex().row()
         if row >= 0:
-            self._gas_table.removeRow(row)
+            self._gas_model.remove_row(row)
         else:
             QMessageBox.information(self, "提示 / Info", "请先点击选中要删除的行。")
 
@@ -476,6 +574,40 @@ class SettingsTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "选择存储文件夹 / Select Save Directory")
         if folder:
             self._save_dir_edit.setText(folder)
+
+    def _set_row_groups(
+        self,
+        groups: list[tuple[int, int]],
+        names: dict[str, str],
+    ) -> None:
+        self._row_groups = list(groups[:MAX_ROW_GROUPS])
+        descriptors = describe_row_groups(
+            self._row_groups,
+            custom_names=names,
+        )
+        self._row_group_names = {
+            descriptor.key: descriptor.label for descriptor in descriptors
+        }
+        if descriptors:
+            labels = [descriptor.label for descriptor in descriptors]
+            preview = "、".join(labels[:3])
+            if len(labels) > 3:
+                preview += f" 等 {len(labels)} 个"
+            self._row_groups_summary.setText(preview)
+        else:
+            self._row_groups_summary.clear()
+
+    def _open_row_group_manager(self) -> None:
+        from .row_group_dialog import RowGroupDialog
+
+        dialog = RowGroupDialog(
+            self._row_groups,
+            self._row_group_names,
+            self,
+        )
+        if dialog.exec():
+            groups, names = dialog.values()
+            self._set_row_groups(groups, names)
 
     def update_device_status(self, info: CameraInfo | None) -> None:
         if info is None:
@@ -517,20 +649,9 @@ class SettingsTab(QWidget):
 
     @Slot()
     def _on_apply(self) -> None:
-        raw_text = self._row_groups_edit.text().strip()
-        if raw_text:
-            groups = DataProcessor.parse_groups(raw_text)
-            if not groups:
-                QMessageBox.warning(
-                    self,
-                    "行分组格式错误 / Invalid Row Group Format",
-                    f"无法解析：\n「{raw_text}」\n\n"
-                    "请使用格式: 1-40, 91-130, 200-250\n"
-                    "留空表示使用全部行。",
-                )
-                return
-        else:
-            groups = []
+        raw_text = " ".join(
+            f"{start}-{end}" for start, end in self._row_groups
+        )
 
         gas_configs = self._get_gas_configs()
         if not gas_configs:
@@ -545,6 +666,26 @@ class SettingsTab(QWidget):
         if save_dir != self._save_dir_edit.text():
             self._save_dir_edit.setText(save_dir)
 
+        allowed_ip = self._remote_allowed_ip_edit.text().strip()
+        if allowed_ip:
+            try:
+                ipaddress.ip_address(allowed_ip)
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    "IP 地址无效 / Invalid IP",
+                    "控制室 IP 无法识别，请输入类似 192.168.50.3 的地址，或留空。",
+                )
+                return
+        remote_token = self._remote_token_edit.text().strip()
+        if self._remote_enabled_cb.isChecked() and not remote_token:
+            QMessageBox.warning(
+                self,
+                "访问密钥为空 / Missing Access Key",
+                "启用远程控制前需要设置访问密钥。",
+            )
+            return
+
         updates = {
             "exposure_time_ms": self._exp_spin.value(),
             "temperature_c": self._temp_spin.value(),
@@ -553,11 +694,18 @@ class SettingsTab(QWidget):
             "auto_save": self._auto_save_cb.isChecked(),
             "save_dir": save_dir,
             "row_groups_text": raw_text,
+            "row_group_names": dict(self._row_group_names),
             "row_aggregation": self._row_aggregation_combo.currentData(),
             "merge_factor": self._merge_spin.value(),
             "detection_threshold_sigma": self._threshold_sigma_spin.value(),
             "batch_interval_ms": self._batch_interval_spin.value(),
             "export_sample_rate_hz": self._export_sample_rate_spin.value(),
+            "plot_opengl_enabled": self._plot_opengl_cb.isChecked(),
+            "show_plot_fps": self._show_plot_fps_cb.isChecked(),
+            "remote_enabled": self._remote_enabled_cb.isChecked(),
+            "remote_port": self._remote_port_spin.value(),
+            "remote_allowed_ip": allowed_ip,
+            "remote_token": remote_token,
             "concentration_smoothing": self._smooth_combo.currentData(),
             "arpls_enabled": self._arpls_enable_cb.isChecked(),
             "arpls_mode": self._arpls_mode_combo.currentData(),

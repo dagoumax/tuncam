@@ -18,12 +18,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
 )
 
 from ..calibration import CalibrationPoint, detect_peaks, fit_calibration
+from .table_models import TableDataModel
 
 
 class CalibrationDialog(QDialog):
@@ -48,6 +48,7 @@ class CalibrationDialog(QDialog):
         row_layout = QHBoxLayout(row_gb)
         row_layout.addWidget(QLabel("行组:"))
         self._group_combo = QComboBox()
+        self._group_combo.setMaxVisibleItems(16)
         for i, lbl in enumerate(self._group_labels):
             self._group_combo.addItem(lbl, i)
         row_layout.addWidget(self._group_combo)
@@ -79,9 +80,13 @@ class CalibrationDialog(QDialog):
         # Peak table
         tbl_gb = QGroupBox("校正点 / Calibration Points (填入拉曼位移 cm⁻¹)")
         tbl_layout = QVBoxLayout(tbl_gb)
-        self._table = QTableWidget()
-        self._table.setColumnCount(3)
-        self._table.setHorizontalHeaderLabels(["像素 / Pixel", "强度 / Intensity", "拉曼位移 / Shift (cm⁻¹)"])
+        self._table = QTableView()
+        self._peak_model = TableDataModel(
+            ["像素 / Pixel", "强度 / Intensity", "拉曼位移 / Shift (cm⁻¹)"],
+            editable_columns=(2,),
+            parent=self._table,
+        )
+        self._table.setModel(self._peak_model)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         tbl_layout.addWidget(self._table)
 
@@ -136,31 +141,28 @@ class CalibrationDialog(QDialog):
         self._populate_table(spec)
 
     def _populate_table(self, spec: np.ndarray) -> None:
-        self._table.setRowCount(len(self._peaks))
-        for i, p in enumerate(self._peaks):
-            self._table.setItem(i, 0, QTableWidgetItem(str(p)))
-            self._table.setItem(i, 1, QTableWidgetItem(f"{spec[p]:.1f}"))
-            # Keep existing shift values if they exist
-            existing = self._table.item(i, 2)
-            if existing is None or not existing.text().strip():
-                self._table.setItem(i, 2, QTableWidgetItem(""))
+        existing_shifts = {
+            int(row[0]): row[2]
+            for row in self._peak_model.rows()
+            if row[0].strip().isdigit() and row[2].strip()
+        }
+        self._peak_model.replace_rows([
+            (p, f"{spec[p]:.1f}", existing_shifts.get(p, ""))
+            for p in self._peaks
+        ])
 
     @Slot()
     def _on_clear(self) -> None:
-        self._table.setRowCount(0)
+        self._peak_model.clear()
         self._peaks = []
 
     @Slot()
     def _on_calibrate(self) -> None:
         points: list[CalibrationPoint] = []
-        for row in range(self._table.rowCount()):
-            pixel_item = self._table.item(row, 0)
-            shift_item = self._table.item(row, 2)
-            if pixel_item is None or shift_item is None:
-                continue
+        for row in self._peak_model.rows():
             try:
-                px = int(pixel_item.text().strip())
-                shift_text = shift_item.text().strip()
+                px = int(row[0].strip())
+                shift_text = row[2].strip()
                 if not shift_text:
                     continue
                 rs = float(shift_text)

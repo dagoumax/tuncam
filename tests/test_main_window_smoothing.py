@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 import tucam_control.ui.main_window as main_window_module
 from tucam_control.concentration_smoother import AdaptiveConcentrationSmoother
@@ -72,11 +73,13 @@ def test_batch_processing_uses_local_time_chart_mode() -> None:
 
     assert len(payloads) == 1
     assert payloads[0]["mode"] == "time"
+    assert "raman_signal" in payloads[0]
 
 
 def test_stopping_batch_clears_pending_frame_and_smoothing_state() -> None:
     states: list[bool] = []
     gaps: list[bool] = []
+    signal_gaps: list[bool] = []
     smoother = AdaptiveConcentrationSmoother()
     result = GasResult("O2", 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, True)
     smoother.smooth_groups([[result]], ["行 1-10"], mode="time")
@@ -85,10 +88,14 @@ def test_stopping_batch_clears_pending_frame_and_smoothing_state() -> None:
         _processing_generation=4,
         _pending_frame=np.ones((2, 2), dtype=np.uint16),
         _concentration_smoother=smoother,
+        _raman_signal_monitor=SimpleNamespace(mark_gap=lambda: signal_gaps.append(True)),
         _conc_tab=SimpleNamespace(mark_history_gap=lambda: gaps.append(True)),
         _acq_tab=SimpleNamespace(set_batch_state=states.append),
         _batch_idx=2,
         _batch_images=["a", "b"],
+        _batch_generation=1,
+        _batch_load_busy=False,
+        _batch_load_task=None,
         status_changed=SimpleNamespace(emit=lambda _message: None),
     )
 
@@ -99,6 +106,96 @@ def test_stopping_batch_clears_pending_frame_and_smoothing_state() -> None:
     assert smoother._state == {}
     assert states == [False]
     assert gaps == [True]
+    assert signal_gaps == [True]
+
+
+def test_batch_tick_reads_one_image_on_demand(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "frame.tif"
+    expected = np.arange(16, dtype=np.uint16).reshape(4, 4)
+    Image.fromarray(expected).save(image_path)
+    displayed: list[np.ndarray] = []
+    messages: list[str] = []
+    window = SimpleNamespace(
+        _processing_busy=False,
+        _batch_load_busy=False,
+        _batch_load_task=None,
+        _batch_generation=1,
+        _batch_timer=SimpleNamespace(isActive=lambda: True),
+        _batch_idx=0,
+        _batch_images=[str(image_path)],
+        _acq_tab=SimpleNamespace(display_frame=displayed.append),
+        status_changed=SimpleNamespace(emit=messages.append),
+    )
+    window._on_batch_frame_loaded = (
+        lambda *args: MainWindow._on_batch_frame_loaded(window, *args)
+    )
+    window._on_batch_frame_load_failed = (
+        lambda *args: MainWindow._on_batch_frame_load_failed(window, *args)
+    )
+    monkeypatch.setattr(
+        main_window_module.QThreadPool,
+        "globalInstance",
+        lambda: SimpleNamespace(start=lambda task: task.run()),
+    )
+
+    MainWindow._on_batch_tick(window)
+
+    assert window._batch_idx == 1
+    assert window._batch_images == [str(image_path)]
+    assert len(displayed) == 1
+    np.testing.assert_array_equal(displayed[0], expected)
+    assert image_path.name in messages[-1]
+
+
+def test_batch_tick_skips_unreadable_image_without_stopping(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bad_path = tmp_path / "bad.tif"
+    bad_path.write_text("not a tif", encoding="utf-8")
+    good_path = tmp_path / "good.tif"
+    expected = np.full((3, 3), 42, dtype=np.uint16)
+    Image.fromarray(expected).save(good_path)
+    displayed: list[np.ndarray] = []
+    messages: list[str] = []
+    window = SimpleNamespace(
+        _processing_busy=False,
+        _batch_load_busy=False,
+        _batch_load_task=None,
+        _batch_generation=1,
+        _batch_timer=SimpleNamespace(isActive=lambda: True),
+        _batch_idx=0,
+        _batch_images=[str(bad_path), str(good_path)],
+        _acq_tab=SimpleNamespace(display_frame=displayed.append),
+        status_changed=SimpleNamespace(emit=messages.append),
+    )
+    window._on_batch_tick = lambda: MainWindow._on_batch_tick(window)
+    window._on_batch_frame_loaded = (
+        lambda *args: MainWindow._on_batch_frame_loaded(window, *args)
+    )
+    window._on_batch_frame_load_failed = (
+        lambda *args: MainWindow._on_batch_frame_load_failed(window, *args)
+    )
+    monkeypatch.setattr(
+        main_window_module.QThreadPool,
+        "globalInstance",
+        lambda: SimpleNamespace(start=lambda task: task.run()),
+    )
+    monkeypatch.setattr(
+        main_window_module.QTimer,
+        "singleShot",
+        lambda _delay, callback: callback(),
+    )
+
+    MainWindow._on_batch_tick(window)
+
+    assert window._batch_idx == 2
+    assert len(displayed) == 1
+    np.testing.assert_array_equal(displayed[0], expected)
+    assert any(bad_path.name in message for message in messages)
 
 
 def test_statistics_window_change_is_persisted_immediately(monkeypatch) -> None:

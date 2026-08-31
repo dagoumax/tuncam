@@ -16,3 +16,7 @@ temp_info.txt
 
 # Keep lock files tracked for reproducible application installs.
 !uv.lock
+.doc_review/
+
+# Generated documentation artifacts kept outside application source control.
+拉曼机箱调试文档_*.docx

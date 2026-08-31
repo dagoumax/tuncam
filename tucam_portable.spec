@@ -8,6 +8,18 @@ dlls = [(str(path), "lib/x64") for path in (root / "lib" / "x64").glob("*.dll")]
 datas = [
     (str(root / "assets"), "assets"),
     (str(root / "config"), "config"),
+    (
+        str(root / "src" / "tucam_control" / "remote_dashboard.html"),
+        "tucam_control",
+    ),
+    (
+        str(root / "src" / "tucam_control" / "remote_dashboard.css"),
+        "tucam_control",
+    ),
+    (
+        str(root / "src" / "tucam_control" / "remote_dashboard.js"),
+        "tucam_control",
+    ),
 ]
 
 a = Analysis(

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dhyana 95 V2 远程控制</title>
+  <link rel="stylesheet" href="/remote_dashboard.css">
+</head>
+<body>
+  <header><h1>Dhyana 95 V2 远程控制</h1><div class="connection"><span id="dot" class="dot"></span><span id="linkState">正在连接</span></div></header>
+  <main>
+    <section>
+      <div class="toolbar">
+        <button id="start" class="primary">开始采集</button><button id="stop" class="stop">停止采集</button>
+        <label class="delay-control">显示延迟 <select id="delay"><option value="1">1 秒</option><option value="3" selected>3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option></select></label>
+        <button id="emergency" class="danger">急停</button>
+      </div>
+      <div class="status-grid">
+        <div class="metric"><div class="label">相机连接</div><div id="camera" class="value">--</div></div><div class="metric"><div class="label">采集状态</div><div id="capture" class="value">--</div></div>
+        <div class="metric"><div class="label">曝光时间</div><div id="exposure" class="value">--</div></div><div class="metric"><div class="label">传感器温度</div><div id="temperature" class="value">--</div></div>
+        <div class="metric"><div class="label">帧间隔</div><div id="interval" class="value">--</div></div><div class="metric"><div class="label">处理时长</div><div id="processing" class="value">--</div></div>
+      </div>
+      <div class="stream-grid"><span>缓冲 <b id="buffer">0</b></span><span>数据延迟 <b id="dataAge">--</b></span><span>显示帧率 <b id="remoteFps">--</b></span><span>请求耗时 <b id="latency">--</b></span></div>
+      <div id="message" class="message">等待现场程序状态</div>
+    </section>
+    <div class="content">
+      <section><div class="section-head"><h2>浓度变化</h2><select id="series"></select></div><div class="chart-wrap"><canvas id="chart"></canvas></div></section>
+      <section><div class="section-head"><h2>当前浓度</h2><span id="measurementTime">--</span></div><div class="table-wrap"><table><thead><tr><th>探头</th><th>气体</th><th>浓度 (%)</th><th>状态</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty">正在建立数据缓冲</div></div></section>
+    </div>
+  </main>
+  <div id="login" class="login"><div class="login-panel"><h2>连接现场设备</h2><p>请输入现场软件设置页显示的远程访问密钥。</p><input id="token" type="password" autocomplete="current-password" placeholder="远程访问密钥"><button id="connect" class="primary">连接</button><div id="loginError" class="error"></div></div></div>
+  <script src="/remote_dashboard.js"></script>
+</body>
+</html>

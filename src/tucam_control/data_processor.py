@@ -4,8 +4,7 @@ Data processor for splitting rows, merging columns, and baseline correction (arP
 """
 
 import numpy as np
-from scipy.sparse import diags
-from scipy.sparse.linalg import spsolve
+from scipy.linalg import solve_banded
 
 
 def arPLS(y: np.ndarray, lam: float = 1e5, max_iter: int = 50, tol: float = 1e-6) -> np.ndarray:
@@ -33,15 +32,33 @@ def arPLS(y: np.ndarray, lam: float = 1e5, max_iter: int = 50, tol: float = 1e-6
     if N < 3:
         return y.copy()
 
-    D = diags([1, -2, 1], [0, 1, 2], shape=(N - 2, N), format="csc")
-    DTD = D.T @ D
+    main = np.full(N, 6.0, dtype=np.float64)
+    main[:2] = (1.0, 5.0)
+    main[-2:] = (5.0, 1.0)
+    first_offdiag = np.full(N - 1, -4.0, dtype=np.float64)
+    first_offdiag[0] = first_offdiag[-1] = -2.0
+    second_offdiag = np.ones(N - 2, dtype=np.float64)
     w = np.ones(N, dtype=np.float64)
 
+    def solve_baseline(weights: np.ndarray) -> np.ndarray:
+        # W + lam * D.T @ D is symmetric pentadiagonal. The banded solver
+        # avoids rebuilding and factorizing a generic sparse matrix each pass.
+        bands = np.zeros((5, N), dtype=np.float64)
+        bands[2] = weights + lam * main
+        bands[1, 1:] = lam * first_offdiag
+        bands[0, 2:] = lam * second_offdiag
+        bands[3, :-1] = lam * first_offdiag
+        bands[4, :-2] = lam * second_offdiag
+        return solve_banded(
+            (2, 2),
+            bands,
+            weights * y,
+            overwrite_ab=True,
+            check_finite=False,
+        )
+
     for _ in range(max_iter):
-        W = diags(w, 0, shape=(N, N), format="csc")
-        A = W + lam * DTD
-        b = w * y
-        z = spsolve(A, b)
+        z = solve_baseline(w)
 
         d = y - z
         idx = d < 0
@@ -61,8 +78,7 @@ def arPLS(y: np.ndarray, lam: float = 1e5, max_iter: int = 50, tol: float = 1e-6
         norm_w = max(norm_w, np.finfo(np.float64).eps)
         if np.linalg.norm(w_new - w) / norm_w < tol:
             w = w_new
-            W = diags(w, 0, shape=(N, N), format="csc")
-            z = spsolve(W + lam * DTD, w * y)
+            z = solve_baseline(w)
             break
 
         w = w_new
@@ -102,6 +118,7 @@ class DataProcessor:
         self._last_image: np.ndarray | None = None
         self._last_raw: np.ndarray | None = None
         self._last_baseline: np.ndarray | None = None
+        self._last_analysis_result: np.ndarray | None = None
         self._last_result: np.ndarray | None = None
 
     # ------------------------------------------------------------------
@@ -194,6 +211,11 @@ class DataProcessor:
         return self._last_baseline
 
     @property
+    def last_analysis_result(self) -> np.ndarray | None:
+        """Spectrum intended for peak detection, independent of display mode."""
+        return self._last_analysis_result
+
+    @property
     def last_result(self) -> np.ndarray | None:
         return self._last_result
 
@@ -263,13 +285,16 @@ class DataProcessor:
                     tol=self._arPLS_tol,
                 )
             self._last_baseline = baselines
+            corrected = merged - baselines
+            self._last_analysis_result = corrected
 
             if self._baseline_mode == self.BASELINE_CORRECTED:
-                return merged - baselines
+                return corrected
             elif self._baseline_mode == self.BASELINE_ONLY:
                 return baselines
         else:
             self._last_baseline = None
+            self._last_analysis_result = merged
         return merged
 
     # ------------------------------------------------------------------

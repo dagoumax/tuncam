@@ -21,6 +21,13 @@ _CONFIGURED = False
 _FAULT_FILE = None
 
 
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def debug_log_path() -> Path:
     """Return the legacy debug log path."""
     return app_log_path()
@@ -43,10 +50,12 @@ def setup_app_logging() -> Path:
     root_logger.propagate = False
 
     if not _CONFIGURED:
+        max_megabytes = _positive_env_int("TUCAM_LOG_MAX_MB", 5)
+        backup_count = _positive_env_int("TUCAM_LOG_BACKUP_COUNT", 5)
         handler = RotatingFileHandler(
             log_path,
-            maxBytes=5 * 1024 * 1024,
-            backupCount=5,
+            maxBytes=max_megabytes * 1024 * 1024,
+            backupCount=backup_count,
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter(_LOG_FORMAT, _DATE_FORMAT))
@@ -57,8 +66,11 @@ def setup_app_logging() -> Path:
 
         sys.excepthook = _log_unhandled_exception
         root_logger.info(
-            "Logging initialized: log=%s python=%s platform=%s executable=%s",
+            "Logging initialized: log=%s max_mb=%s backups=%s "
+            "encoding=utf-8 python=%s platform=%s executable=%s",
             log_path,
+            max_megabytes,
+            backup_count,
             sys.version.replace("\n", " "),
             platform.platform(),
             sys.executable,

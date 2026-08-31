@@ -60,8 +60,7 @@ class ImageLabel(QLabel):
     def set_image(self, raw_array: np.ndarray, display_array: np.ndarray) -> None:
         self._raw_array = raw_array
         h, w = display_array.shape
-        self._img_w = w
-        self._img_h = h
+        self._img_h, self._img_w = raw_array.shape
         qimg = QImage(display_array.data, w, h, w, QImage.Format.Format_Grayscale8)
         pixmap = QPixmap.fromImage(qimg)
         self.setPixmap(
@@ -196,6 +195,9 @@ class AcquisitionTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._capturing = False
+        self._pending_preview: np.ndarray | None = None
+        self._pending_telemetry: CameraInfo | None = None
+        self._pending_diagnostics: dict | None = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -308,6 +310,12 @@ class AcquisitionTab(QWidget):
         self._info_text.setPlainText("\n".join(lines))
 
     def update_telemetry(self, info: CameraInfo) -> None:
+        self._pending_telemetry = info
+        if not self.isVisible():
+            return
+        self._render_telemetry(info)
+
+    def _render_telemetry(self, info: CameraInfo) -> None:
         temp_parts = []
         if abs(info.fpga_temperature) > 0.01:
             temp_parts.append(f"FPGA {info.fpga_temperature:.1f} °C")
@@ -324,6 +332,12 @@ class AcquisitionTab(QWidget):
         self._tel_label.setText("\n".join(lines))
 
     def update_diagnostics(self, diagnostics: dict) -> None:
+        self._pending_diagnostics = dict(diagnostics)
+        if not self.isVisible():
+            return
+        self._render_diagnostics(diagnostics)
+
+    def _render_diagnostics(self, diagnostics: dict) -> None:
         errors = diagnostics.get("errors", [])
         temp_readback = diagnostics.get("temperature_readback_c", "--")
         try:
@@ -338,6 +352,8 @@ class AcquisitionTab(QWidget):
             f"图像: {diagnostics.get('shape', '--')} {diagnostics.get('dtype', '')}",
             f"像素: min={diagnostics.get('min', '--')} max={diagnostics.get('max', '--')} mean={diagnostics.get('mean', '--')}",
             f"处理: {diagnostics.get('processing_ms', '--')} ms  平均 {diagnostics.get('processing_avg_ms', '--')} ms",
+            f"处理进程: CPU {diagnostics.get('processing_cpu_percent', '--')}%  "
+            f"内存 {diagnostics.get('processing_memory_mb', '--')} MiB",
         ]
         dropped = diagnostics.get("dropped_frames", 0)
         if dropped:
@@ -348,15 +364,35 @@ class AcquisitionTab(QWidget):
         self._diag_label.setText("\n".join(lines))
 
     def display_frame(self, arr: np.ndarray) -> None:
+        self._pending_preview = arr
+        self.frame_ready.emit(arr)
+        if self.isVisible():
+            self._render_preview(arr)
+
+    def _render_preview(self, arr: np.ndarray) -> None:
+        """Render only as many pixels as the preview widget can display."""
         h, w = arr.shape
+        target_w = max(256, self._img_label.width())
+        target_h = max(256, self._img_label.height())
+        step = max(1, int(np.ceil(max(w / target_w, h / target_h))))
+        preview = arr[::step, ::step]
         mn = arr.min()
         mx = arr.max()
         if mx > mn:
-            display = ((arr.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
+            scale = np.float32(255.0 / float(mx - mn))
+            display = ((preview.astype(np.float32) - float(mn)) * scale).astype(np.uint8)
         else:
-            display = np.zeros_like(arr, dtype=np.uint8)
+            display = np.zeros_like(preview, dtype=np.uint8)
         self._img_label.set_image(arr, display)
-        self.frame_ready.emit(arr)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._pending_preview is not None:
+            self._render_preview(self._pending_preview)
+        if self._pending_telemetry is not None:
+            self._render_telemetry(self._pending_telemetry)
+        if self._pending_diagnostics is not None:
+            self._render_diagnostics(self._pending_diagnostics)
 
     @Slot()
     def _on_load_tif(self) -> None:

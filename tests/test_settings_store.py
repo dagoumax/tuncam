@@ -8,6 +8,10 @@ def test_settings_round_trip(tmp_path) -> None:
     path = tmp_path / "config" / "user_settings.json"
     settings = {
         "row_groups_text": "1-10,20-30",
+        "row_group_names": {
+            "rows:1:10": "参考通道",
+            "rows:20:30": "哈龙通道",
+        },
         "row_aggregation": "sum",
         "exposure_time_ms": 1000.0,
         "statistics_window_seconds": 60,
