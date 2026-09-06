@@ -19,6 +19,9 @@ class ThresholdStatistics:
     cumulative_seconds: float
     sample_count: int
     mean_percent: float
+    standard_deviation_percent: float
+    range_low_percent: float
+    range_high_percent: float
     latest_time: datetime
 
 
@@ -117,6 +120,10 @@ class ThresholdStatisticsTracker:
                 continue
             values = [value for _, value in state.samples]
             mean = sum(values) / len(values)
+            variance = sum((value - mean) ** 2 for value in values) / len(values)
+            standard_deviation = variance ** 0.5
+            range_low = max(0.0, mean - standard_deviation)
+            range_high = min(100.0, mean + standard_deviation)
             threshold = self._thresholds.get(gas_name)
             snapshots.append(
                 ThresholdStatistics(
@@ -129,6 +136,9 @@ class ThresholdStatisticsTracker:
                     cumulative_seconds=state.cumulative_seconds,
                     sample_count=len(values),
                     mean_percent=mean,
+                    standard_deviation_percent=standard_deviation,
+                    range_low_percent=range_low,
+                    range_high_percent=range_high,
                     latest_time=state.latest_time,
                 )
             )

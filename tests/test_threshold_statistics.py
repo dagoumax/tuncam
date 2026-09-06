@@ -99,9 +99,12 @@ def test_rolling_window_uses_only_recent_values_for_mean() -> None:
     snapshot = tracker.snapshots()[0]
     assert snapshot.sample_count == 2
     assert snapshot.mean_percent == pytest.approx(4.0)
+    assert snapshot.standard_deviation_percent == pytest.approx(1.0)
+    assert snapshot.range_low_percent == pytest.approx(3.0)
+    assert snapshot.range_high_percent == pytest.approx(5.0)
 
 
-def test_single_sample_is_its_own_mean() -> None:
+def test_single_sample_has_zero_standard_deviation() -> None:
     tracker = ThresholdStatisticsTracker()
     now = datetime(2026, 7, 23, 10, 0, 0)
     _add(tracker, 100.0, now)
@@ -109,3 +112,6 @@ def test_single_sample_is_its_own_mean() -> None:
     snapshot = tracker.snapshots()[0]
     assert snapshot.sample_count == 1
     assert snapshot.mean_percent == 100.0
+    assert snapshot.standard_deviation_percent == 0.0
+    assert snapshot.range_low_percent == 100.0
+    assert snapshot.range_high_percent == 100.0

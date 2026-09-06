@@ -99,11 +99,16 @@ def test_all_groups_need_three_consecutive_noise_frames_for_failure() -> None:
     assessment = assess_raman_signal(_noise_spectra(), ["A", "B"], GASES)
     monitor = RamanSignalHealthMonitor(failure_frames=3, recovery_frames=2)
 
-    assert monitor.update(assessment).state == "suspect"
-    assert monitor.update(assessment).state == "suspect"
+    first = monitor.update(assessment)
+    second = monitor.update(assessment)
     failed = monitor.update(assessment)
 
+    assert first.state == "suspect"
+    assert second.state == "suspect"
+    assert first.invalid_group_ids == ()
+    assert second.invalid_group_ids == ()
     assert failed.state == "failed"
+    assert failed.invalid_group_ids == ("A", "B")
     assert "检查激光器" in failed.message
 
 
@@ -193,3 +198,31 @@ def test_renaming_group_keeps_failure_counter_by_stable_id() -> None:
     assert status.noise_only_groups == ("哈龙通道",)
     assert "哈龙通道" in status.message
     assert "旧名称B" not in status.message
+
+
+def test_single_group_requires_two_valid_frames_before_recovery() -> None:
+    spectra = _healthy_spectra()
+    spectra[1] = _noise_spectra(1)[0]
+    failed_assessment = assess_raman_signal(
+        spectra,
+        ["good", "bad"],
+        GASES,
+        group_ids=["probe-good", "probe-bad"],
+    )
+    healthy_assessment = assess_raman_signal(
+        _healthy_spectra(),
+        ["good", "bad"],
+        GASES,
+        group_ids=["probe-good", "probe-bad"],
+    )
+    monitor = RamanSignalHealthMonitor(failure_frames=3, recovery_frames=2)
+    for _ in range(3):
+        monitor.update(failed_assessment)
+
+    first = monitor.update(healthy_assessment)
+    second = monitor.update(healthy_assessment)
+
+    assert first.state == "degraded"
+    assert first.invalid_group_ids == ("probe-bad",)
+    assert second.state == "healthy"
+    assert second.invalid_group_ids == ()

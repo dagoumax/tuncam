@@ -42,6 +42,20 @@ class AdaptiveConcentrationSmoother:
         self._state.clear()
         self._recent.clear()
 
+    def reset_groups(self, group_ids) -> None:
+        """Discard smoothing history for selected stable group identifiers."""
+        selected = {str(group_id) for group_id in group_ids}
+        if not selected:
+            return
+        self._state = {
+            key: value for key, value in self._state.items()
+            if key[0] not in selected
+        }
+        self._recent = {
+            key: value for key, value in self._recent.items()
+            if key[0] not in selected
+        }
+
     def set_profile(self, profile_name: str) -> None:
         if profile_name not in PROFILES:
             profile_name = "balanced"

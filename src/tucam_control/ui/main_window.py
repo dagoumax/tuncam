@@ -35,7 +35,7 @@ from ..data_processor import DataProcessor
 from ..debug_log import get_debug_logger
 from ..gas_analyzer import GasAnalyzer
 from ..processing_process import ProcessDataProcessor, process_frame_payload
-from ..raman_signal_diagnostic import RamanSignalHealthMonitor
+from ..raman_signal_diagnostic import RamanSignalHealthMonitor, assess_raman_signal
 from ..remote_server import (
     RemoteCommand,
     RemoteControlServer,
@@ -1707,6 +1707,55 @@ class MainWindow(QMainWindow):
                 outcome.error or "Unknown processing process error"
             )
 
+    @staticmethod
+    def _zero_invalid_group_concentrations(
+        all_group_results: list,
+        group_ids: list[str],
+        invalid_group_ids,
+    ) -> list:
+        invalid = {str(group_id) for group_id in invalid_group_ids}
+        results = copy.deepcopy(all_group_results)
+        for group_id, gas_results in zip(group_ids, results):
+            if str(group_id) not in invalid:
+                continue
+            for gas_result in gas_results:
+                gas_result.component = 0.0
+                gas_result.concentration = 0.0
+                gas_result.detected = False
+        return results
+
+    def _prepare_concentration_results(
+        self,
+        all_group_results: list,
+        group_ids: list[str],
+        mode: str,
+        signal_status,
+    ) -> tuple[list, list]:
+        invalid_group_ids = tuple(
+            getattr(signal_status, "invalid_group_ids", ())
+        )
+        display_results = self._concentration_smoother.smooth_groups(
+            all_group_results,
+            group_ids,
+            mode,
+        )
+        if not invalid_group_ids:
+            return display_results, copy.deepcopy(all_group_results)
+
+        self._concentration_smoother.reset_groups(invalid_group_ids)
+        return (
+            MainWindow._zero_invalid_group_concentrations(
+                display_results,
+                group_ids,
+                invalid_group_ids,
+            ),
+            MainWindow._zero_invalid_group_concentrations(
+                all_group_results,
+                group_ids,
+                invalid_group_ids,
+            ),
+        )
+
     @Slot(object)
     def _on_processing_finished(self, payload: dict) -> None:
         self._processing_busy = False
@@ -1761,16 +1810,17 @@ class MainWindow(QMainWindow):
             if payload["all_results"]:
                 group_ids = payload.get("group_ids", payload["labels"])
                 measurement_time = datetime.now().astimezone()
-                display_results = self._concentration_smoother.smooth_groups(
+                display_results, export_results = self._prepare_concentration_results(
                     payload["all_results"],
                     group_ids,
                     payload["mode"],
+                    signal_status,
                 )
                 self._conc_tab.add_data_point(
                     display_results,
                     payload["labels"],
                     mode=payload["mode"],
-                    raw_group_results=payload["all_results"],
+                    raw_group_results=export_results,
                     group_ids=group_ids,
                     measurement_time=measurement_time,
                 )
@@ -1899,18 +1949,28 @@ class MainWindow(QMainWindow):
                 if analysis_result is None:
                     analysis_result = result
                 all_results = self._analyzer.analyze_groups(analysis_result)
+                signal_assessment = assess_raman_signal(
+                    analysis_result,
+                    labels,
+                    self._analyzer.gases,
+                    self._processor.merge_factor,
+                    group_ids=group_ids,
+                )
+                signal_status = self._raman_signal_monitor.update(signal_assessment)
+                self._conc_tab.update_raman_signal_status(signal_status)
                 mode = "time"
-                display_results = self._concentration_smoother.smooth_groups(
+                display_results, export_results = self._prepare_concentration_results(
                     all_results,
                     group_ids,
                     mode,
+                    signal_status,
                 )
                 measurement_time = datetime.now().astimezone()
                 self._conc_tab.add_data_point(
                     display_results,
                     labels,
                     mode=mode,
-                    raw_group_results=all_results,
+                    raw_group_results=export_results,
                     group_ids=group_ids,
                     measurement_time=measurement_time,
                 )

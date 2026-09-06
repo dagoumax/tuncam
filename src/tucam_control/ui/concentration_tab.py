@@ -17,7 +17,6 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -108,6 +107,7 @@ class ConcentrationTab(QWidget):
         self._fps_display_enabled = False
         self._fps_frame_count = 0
         self._fps_window_started = time.monotonic()
+        self._invalid_group_ids: set[str] = set()
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setInterval(DISPLAY_ANIMATION_INTERVAL_MS)
@@ -118,99 +118,91 @@ class ConcentrationTab(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-        top_layout = QHBoxLayout()
-        top_layout.setSpacing(8)
+        layout.setSpacing(7)
 
-        # -- Left: current concentrations --
-        left_widget = QWidget()
-        left_widget.setMinimumWidth(330)
-        left_widget.setMaximumWidth(420)
-        left = QVBoxLayout(left_widget)
-        left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(6)
-
-        gb_table = QGroupBox("当前浓度 / Current Concentration")
-        tbl_layout = QVBoxLayout(gb_table)
-        self._table = QTableView()
-        self._current_model = TableDataModel(
-            ["气体 / Gas", "峰高 / Height", "浓度 / Conc"],
-            parent=self._table,
+        self._raman_signal_label = QLabel(
+            "拉曼信号 / Raman Signal: 等待数据 / Waiting for data"
         )
-        self._table.setModel(self._current_model)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.verticalHeader().setDefaultSectionSize(28)
-        self._table.setMinimumHeight(155)
-        tbl_layout.addWidget(self._table)
-        left.addWidget(gb_table)
-
-        self._total_label = QLabel("浓度总和 / Total: --")
-        left.addWidget(self._total_label)
+        self._raman_signal_label.setWordWrap(True)
+        self._raman_signal_label.setMinimumHeight(34)
+        self._raman_signal_label.setStyleSheet(
+            "QLabel { background: #f2f3f5; color: #50545a; "
+            "border: 1px solid #c9ccd1; border-radius: 3px; padding: 5px 10px; }"
+        )
+        layout.addWidget(self._raman_signal_label)
 
         gb_ctrl = QGroupBox("图表控制 / Chart Control")
         ctrl_layout = QVBoxLayout(gb_ctrl)
+        ctrl_layout.setContentsMargins(9, 7, 9, 7)
         ctrl_layout.setSpacing(6)
-        control_form = QFormLayout()
-        control_form.setHorizontalSpacing(8)
-        control_form.setVerticalSpacing(6)
 
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(6)
         self._group_combo = QComboBox()
         self._group_combo.setMaxVisibleItems(16)
         self._group_combo.setMinimumContentsLength(12)
+        self._group_combo.setMinimumWidth(150)
         self._group_combo.addItem("全部探头 / All Probes", "__all__")
         self._group_combo.currentIndexChanged.connect(self._do_redraw)
-        control_form.addRow("探头 / Probe:", self._group_combo)
+        filter_layout.addWidget(QLabel("探头 / Probe:"))
+        filter_layout.addWidget(self._group_combo, 2)
 
         self._gas_combo = QComboBox()
+        self._gas_combo.setMinimumWidth(100)
         self._gas_combo.addItem("全部 / All", "all")
         self._gas_combo.currentIndexChanged.connect(self._do_redraw)
-        control_form.addRow("气体 / Gas:", self._gas_combo)
+        filter_layout.addWidget(QLabel("气体 / Gas:"))
+        filter_layout.addWidget(self._gas_combo, 1)
 
         self._display_range_combo = QComboBox()
+        self._display_range_combo.setMinimumWidth(140)
         self._display_range_combo.addItem("最近100点 / Last 100 points", "visible")
         self._display_range_combo.addItem("最近10分钟 / Last 10 min", 600)
         self._display_range_combo.addItem("最近1小时 / Last 1 hour", 3600)
         self._display_range_combo.addItem("全部历史 / All History", "all")
         self._display_range_combo.currentIndexChanged.connect(self._do_redraw)
-        control_form.addRow("显示范围 / Range:", self._display_range_combo)
+        filter_layout.addWidget(QLabel("显示 / Range:"))
+        filter_layout.addWidget(self._display_range_combo, 2)
 
         self._export_range_combo = QComboBox()
+        self._export_range_combo.setMinimumWidth(140)
         self._export_range_combo.addItem("全部历史 / All History", "all")
         self._export_range_combo.addItem("最近10分钟 / Last 10 min", 600)
         self._export_range_combo.addItem("最近1小时 / Last 1 hour", 3600)
         self._export_range_combo.addItem("当前显示窗口 / Visible Window", "visible")
-        control_form.addRow("导出范围 / Export:", self._export_range_combo)
-        ctrl_layout.addLayout(control_form)
+        filter_layout.addWidget(QLabel("导出 / Export:"))
+        filter_layout.addWidget(self._export_range_combo, 2)
+        ctrl_layout.addLayout(filter_layout)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(6)
         self._btn_clear = QPushButton("清除历史 / Clear")
         self._btn_clear.clicked.connect(self._on_clear)
         self._btn_export = QPushButton("导出 CSV / Export")
         self._btn_export.clicked.connect(self._on_export)
-        btn_row.addWidget(self._btn_clear)
-        btn_row.addWidget(self._btn_export)
-        ctrl_layout.addLayout(btn_row)
+        action_layout.addWidget(self._btn_clear)
+        action_layout.addWidget(self._btn_export)
+
+        self._pt_label = QLabel("数据点 / Points: 0")
+        self._pt_label.setMinimumWidth(105)
+        action_layout.addWidget(self._pt_label)
+        action_layout.addStretch()
 
         self._btn_emergency_stop = QPushButton("急停 / Emergency Stop")
         self._btn_emergency_stop.setStyleSheet(
             "QPushButton { background-color: #c62828; color: white; font-weight: bold; "
-            "min-height: 34px; } QPushButton:hover { background-color: #b71c1c; }"
+            "min-height: 30px; padding: 0 12px; } "
+            "QPushButton:hover { background-color: #b71c1c; }"
         )
         self._btn_emergency_stop.clicked.connect(self.emergency_stop_requested.emit)
-        ctrl_layout.addWidget(self._btn_emergency_stop)
-
-        self._pt_label = QLabel("数据点 / Points: 0")
-        ctrl_layout.addWidget(self._pt_label)
-
-        left.addWidget(gb_ctrl)
-        left.addStretch()
-        top_layout.addWidget(left_widget)
-
-        # -- Right: trend chart --
-        right = QVBoxLayout()
+        action_layout.addWidget(self._btn_emergency_stop)
+        ctrl_layout.addLayout(action_layout)
+        layout.addWidget(gb_ctrl)
         pg.setConfigOptions(antialias=True)
-        self._plot_widget = pg.PlotWidget(axisItems={"bottom": LocalTimeAxis(orientation="bottom")})
+        self._plot_widget = pg.PlotWidget(
+            axisItems={"bottom": LocalTimeAxis(orientation="bottom")}
+        )
+        self._plot_widget.setMinimumHeight(300)
         self._fps_label = QLabel("FPS: --", self._plot_widget)
         self._fps_label.setStyleSheet(
             "QLabel { background: rgba(25, 25, 25, 185); color: white; "
@@ -225,46 +217,12 @@ class ConcentrationTab(QWidget):
         self._plot_item.setLabel("left", "浓度 / Concentration (%)")
         self._plot_item.setLabel("bottom", "本地时间 / Local Time")
         self._legend = self._plot_item.addLegend(offset=(-12, 12))
-        right.addWidget(self._plot_widget, 1)
-
-        top_layout.addLayout(right, 2)
-        layout.addLayout(top_layout, 4)
-
-        self._raman_signal_label = QLabel(
-            "拉曼信号 / Raman Signal: 等待数据 / Waiting for data"
-        )
-        self._raman_signal_label.setWordWrap(True)
-        self._raman_signal_label.setMinimumHeight(30)
-        self._raman_signal_label.setStyleSheet(
-            "QLabel { background: #f2f3f5; color: #50545a; "
-            "border: 1px solid #c9ccd1; border-radius: 3px; padding: 4px 9px; }"
-        )
-        layout.addWidget(self._raman_signal_label)
+        layout.addWidget(self._plot_widget, 4)
 
         stats_group = QGroupBox("阈值统计 / Threshold Statistics")
         stats_layout = QVBoxLayout(stats_group)
-        self._statistics_table = QTableView()
-        self._statistics_model = TableDataModel([
-            "探头 / Probe",
-            "气体 / Gas",
-            "当前 (%)",
-            "阈值 (%)",
-            "连续 (s)",
-            "累计 (s)",
-            "N秒点数",
-            "N秒均值 (%)",
-            "状态 / Status",
-        ], parent=self._statistics_table)
-        self._statistics_table.setModel(self._statistics_model)
-        stats_header = self._statistics_table.horizontalHeader()
-        stats_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        stats_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
-        for column, width in enumerate((125, 90, 90, 90, 90, 90, 80, 120, 115)):
-            if column != 7:
-                self._statistics_table.setColumnWidth(column, width)
-        self._statistics_table.verticalHeader().setDefaultSectionSize(30)
-        self._statistics_table.setMinimumHeight(170)
-        stats_layout.addWidget(self._statistics_table)
+        stats_layout.setContentsMargins(9, 7, 9, 8)
+        stats_layout.setSpacing(6)
 
         stats_actions = QHBoxLayout()
         stats_actions.setSpacing(6)
@@ -283,18 +241,50 @@ class ConcentrationTab(QWidget):
         self._statistics_window_spin.setValue(60)
         self._statistics_window_spin.setSingleStep(10)
         self._statistics_window_spin.setSuffix(" s")
-        self._statistics_window_spin.setMinimumWidth(120)
+        self._statistics_window_spin.setMinimumWidth(110)
         self._statistics_window_spin.valueChanged.connect(
             self._on_statistics_window_changed
         )
-        self._btn_export_statistics = QPushButton("导出统计摘要 / Export Summary")
-        self._btn_export_statistics.clicked.connect(self._on_export_statistics)
         stats_actions.addWidget(self._statistics_window_spin)
         stats_actions.addStretch()
+        self._btn_export_statistics = QPushButton("导出统计摘要 / Export Summary")
+        self._btn_export_statistics.clicked.connect(self._on_export_statistics)
         stats_actions.addWidget(self._btn_export_statistics)
         stats_layout.addLayout(stats_actions)
-        layout.addWidget(stats_group, 1)
 
+        self._statistics_table = QTableView()
+        self._statistics_model = TableDataModel(
+            self._statistics_headers(),
+            parent=self._statistics_table,
+        )
+        self._statistics_table.setModel(self._statistics_model)
+        stats_header = self._statistics_table.horizontalHeader()
+        stats_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        stats_header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        for column, width in enumerate((140, 100, 95, 95, 100, 100, 155, 125)):
+            if column != 6:
+                self._statistics_table.setColumnWidth(column, width)
+        self._statistics_table.verticalHeader().setDefaultSectionSize(28)
+        self._statistics_table.setMinimumHeight(150)
+        stats_layout.addWidget(self._statistics_table)
+        layout.addWidget(stats_group, 2)
+
+    def _statistics_headers(self) -> list[str]:
+        window = self._statistics.window_seconds
+        return [
+            "探头 / Probe",
+            "气体 / Gas",
+            "当前 (%)",
+            "阈值 (%)",
+            "连续 (s)",
+            "累计 (s)",
+            f"{window}秒内均值 ± 1σ (%)",
+            "状态 / Status",
+        ]
+
+    def _update_statistics_headers(self) -> None:
+        if hasattr(self, "_statistics_model"):
+            self._statistics_model.set_headers(self._statistics_headers())
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -433,10 +423,12 @@ class ConcentrationTab(QWidget):
         self._statistics_window_spin.setValue(normalized)
         self._statistics_window_spin.blockSignals(False)
         self._statistics.set_window_seconds(window_seconds)
+        self._update_statistics_headers()
         self._refresh_statistics_table()
 
     def _on_statistics_window_changed(self, window_seconds: int) -> None:
         self._statistics.set_window_seconds(window_seconds)
+        self._update_statistics_headers()
         self._refresh_statistics_table()
         self.statistics_window_changed.emit(self._statistics.window_seconds)
 
@@ -451,6 +443,13 @@ class ConcentrationTab(QWidget):
     def update_raman_signal_status(self, status) -> None:
         state = str(getattr(status, "state", "unavailable"))
         message = str(getattr(status, "message", "等待数据"))
+        self._invalid_group_ids = {
+            str(group_id)
+            for group_id in getattr(status, "invalid_group_ids", ())
+        }
+        if self._invalid_group_ids and "置零" not in message:
+            message = f"{message}；对应探头浓度已置零"
+        self._statistics_table_dirty = True
         palettes = {
             "healthy": ("#e7f5ea", "#146c2e", "#87c796"),
             "suspect": ("#fff4cc", "#805500", "#d9b84c"),
@@ -513,8 +512,6 @@ class ConcentrationTab(QWidget):
         self.set_gas_names([r.name for r in all_group_results[0]])
 
         self._new_data = True
-        if all_group_results:
-            self._update_table(all_group_results[0])
         if self.isVisible():
             self._refresh_statistics_table()
         else:
@@ -530,9 +527,8 @@ class ConcentrationTab(QWidget):
         self._animation_x_min = None
         self._batch_idx = 0
         self._display_y_range = None
-        self._current_model.clear()
+        self._invalid_group_ids.clear()
         self._hide_inactive_plot_items(set())
-        self._total_label.setText("浓度总和 / Total: --")
         self._statistics_model.clear()
         self.update_raman_signal_status(None)
         self._do_redraw()
@@ -586,22 +582,6 @@ class ConcentrationTab(QWidget):
         if glabel and glabel in self._history:
             return self._history[glabel]
         return {}
-
-    def _update_table(self, gas_results: list) -> None:
-        total_conc = 0.0
-        rows = []
-        for i, r in enumerate(gas_results):
-            total_conc += r.concentration
-            detected_mark = "" if r.detected else " (未检出)"
-            rows.append(
-                (
-                    f"{r.name}{detected_mark}",
-                    f"{r.peak_height:.1f}",
-                    f"{r.concentration * 100:.2f} %",
-                )
-            )
-        self._current_model.replace_rows(rows)
-        self._total_label.setText(f"浓度总和 / Total: {total_conc * 100:.2f} %")
 
     @staticmethod
     def _append_results(history: dict, all_group_results: list, group_labels: list[str],
@@ -1251,6 +1231,9 @@ class ConcentrationTab(QWidget):
                 continuous = f"{snapshot.continuous_seconds:.1f}"
                 cumulative = f"{snapshot.cumulative_seconds:.1f}"
                 status = "超限 / Above" if snapshot.is_above else "正常 / Normal"
+            signal_invalid = snapshot.group_label in self._invalid_group_ids
+            if signal_invalid:
+                status = "无拉曼信号 / No Signal"
             rows.append(
                 (
                     self._group_label_by_id.get(
@@ -1262,12 +1245,12 @@ class ConcentrationTab(QWidget):
                     threshold,
                     continuous,
                     cumulative,
-                    str(snapshot.sample_count),
-                    f"{snapshot.mean_percent:.3f}",
+                    (f"{snapshot.mean_percent:.3f} ± "
+                     f"{snapshot.standard_deviation_percent:.3f}"),
                     status,
                 )
             )
-            if snapshot.is_above:
+            if snapshot.is_above or signal_invalid:
                 highlighted_rows.append(row)
         self._statistics_model.replace_rows(
             rows,
@@ -1317,8 +1300,7 @@ class ConcentrationTab(QWidget):
                 "连续超限 (s) / Continuous",
                 "累计超限 (s) / Cumulative",
                 "统计窗口 (s) / Window",
-                "样本数 / Samples",
-                "平均值 (%) / Mean",
+                "均值 ± 1σ (%) / Mean ± 1σ",
                 "状态 / Status",
             ])
             for snapshot in snapshots:
@@ -1335,10 +1317,12 @@ class ConcentrationTab(QWidget):
                     f"{snapshot.continuous_seconds:.3f}" if configured else "",
                     f"{snapshot.cumulative_seconds:.3f}" if configured else "",
                     self._statistics.window_seconds,
-                    snapshot.sample_count,
-                    f"{snapshot.mean_percent:.6f}",
+                    (f"{snapshot.mean_percent:.6f} ± "
+                     f"{snapshot.standard_deviation_percent:.6f}"),
                     (
-                        "超限 / Above"
+                        "无拉曼信号 / No Signal"
+                        if snapshot.group_label in self._invalid_group_ids
+                        else "超限 / Above"
                         if snapshot.is_above
                         else "正常 / Normal" if configured
                         else "未配置阈值 / Not Set"

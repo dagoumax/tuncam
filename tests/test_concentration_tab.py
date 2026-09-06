@@ -148,7 +148,8 @@ def test_threshold_statistics_table_highlights_above_limit() -> None:
     tab.add_data_point([[result]], ["行 1-10"])
 
     assert tab._statistics_model.rowCount() == 1
-    assert tab._statistics_model.cell_text(0, 8) == "超限 / Above"
+    assert tab._statistics_model.cell_text(0, 7) == "超限 / Above"
+    assert tab._statistics_model.cell_text(0, 6) == "12.000 ± 0.000"
     background = tab._statistics_model.data(
         tab._statistics_model.index(0, 0),
         Qt.ItemDataRole.BackgroundRole,
@@ -169,7 +170,7 @@ def test_threshold_statistics_model_reuses_model_and_clears_warning_style() -> N
     tab.add_data_point([[normal]], ["行 1-10"])
 
     assert tab._statistics_table.model() is model
-    assert tab._statistics_model.cell_text(0, 8) == "正常 / Normal"
+    assert tab._statistics_model.cell_text(0, 7) == "正常 / Normal"
     index = tab._statistics_model.index(0, 0)
     assert tab._statistics_model.data(index, Qt.ItemDataRole.BackgroundRole) is None
     assert tab._statistics_model.data(index, Qt.ItemDataRole.ForegroundRole) is None
@@ -206,7 +207,7 @@ def test_statistics_columns_do_not_resize_to_contents_on_every_value_change() ->
     header = tab._statistics_table.horizontalHeader()
 
     assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive
-    assert header.sectionResizeMode(7) == QHeaderView.ResizeMode.Stretch
+    assert header.sectionResizeMode(6) == QHeaderView.ResizeMode.Stretch
 
 
 def test_threshold_statistics_gas_filter_is_independent_from_chart() -> None:
@@ -265,7 +266,7 @@ def test_clear_history_resets_threshold_statistics() -> None:
     assert tab._statistics_model.rowCount() == 0
 
 
-def test_threshold_summary_csv_contains_mean_and_millisecond_time(tmp_path: Path) -> None:
+def test_threshold_summary_csv_contains_mean_plus_sigma_and_time(tmp_path: Path) -> None:
     _app()
     tab = ConcentrationTab()
     tab.set_statistics_window_seconds(60)
@@ -282,9 +283,11 @@ def test_threshold_summary_csv_contains_mean_and_millisecond_time(tmp_path: Path
 
     text = path.read_text(encoding="utf-8-sig")
     assert "连续超限 (s) / Continuous" in text
-    assert "平均值 (%) / Mean" in text
-    assert "标准差" not in text
+    assert "均值 ± 1σ (%) / Mean ± 1σ" in text
+    assert "样本数 / Samples" not in text
+    assert "标准差范围 (%) / ±1σ Range" not in text
     assert "哈龙检测通道,halong,12.000000,10.000000" in text
+    assert "12.000000 ± 0.000000" in text
     assert "rows:1:10" not in text
     assert "起始行" not in text
     assert "结束行" not in text
@@ -519,3 +522,52 @@ def test_three_second_interval_resamples_to_requested_rates() -> None:
     assert len(values_1000) == len(times_1000) == 3001
     assert times_500[1] - times_500[0] == timedelta(milliseconds=2)
     assert times_1000[1] - times_1000[0] == timedelta(milliseconds=1)
+
+def test_current_concentration_box_and_sample_count_column_are_removed() -> None:
+    _app()
+    tab = ConcentrationTab()
+
+    assert not hasattr(tab, "_current_model")
+    assert not hasattr(tab, "_total_label")
+    assert tab._statistics_model.columnCount() == 8
+    headers = [
+        tab._statistics_model.headerData(
+            column,
+            Qt.Orientation.Horizontal,
+            Qt.ItemDataRole.DisplayRole,
+        )
+        for column in range(tab._statistics_model.columnCount())
+    ]
+    assert all("点数" not in header for header in headers)
+    assert all("Samples" not in header for header in headers)
+
+
+def test_statistics_range_header_tracks_window_setting() -> None:
+    _app()
+    tab = ConcentrationTab()
+
+    tab.set_statistics_window_seconds(120)
+
+    assert tab._statistics_model.headerData(
+        6,
+        Qt.Orientation.Horizontal,
+        Qt.ItemDataRole.DisplayRole,
+    ) == "120秒内均值 ± 1σ (%)"
+
+
+def test_invalid_raman_probe_is_marked_as_no_signal() -> None:
+    _app()
+    tab = ConcentrationTab()
+    _show(tab)
+    status = SimpleNamespace(
+        state="degraded",
+        message="探头A连续未检测到有效拉曼信号",
+        invalid_group_ids=("probe-a",),
+    )
+    result = GasResult("halong", 0, 0, 1.0, 1.0, 1.0, 0.0, 0.0, False)
+
+    tab.update_raman_signal_status(status)
+    tab.add_data_point([[result]], ["探头A"], group_ids=["probe-a"])
+
+    assert "浓度已置零" in tab._raman_signal_label.text()
+    assert tab._statistics_model.cell_text(0, 7) == "无拉曼信号 / No Signal"

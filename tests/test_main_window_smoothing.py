@@ -12,6 +12,9 @@ from tucam_control.gas_analyzer import GasResult
 from tucam_control.ui.main_window import MainWindow, _ProcessingTask
 
 
+def _result(name: str, concentration: float) -> GasResult:
+    return GasResult(name, 0, 0, 1.0, 1.0, 1.0, concentration, concentration, True)
+
 class _ConcentrationTabRecorder:
     def __init__(self) -> None:
         self.export_smoothed: bool | None = None
@@ -216,3 +219,26 @@ def test_statistics_window_change_is_persisted_immediately(monkeypatch) -> None:
 
     assert window._settings["statistics_window_seconds"] == 120
     assert saved == [{"statistics_window_seconds": 120}]
+
+def test_invalid_raman_probe_is_zeroed_for_display_and_export() -> None:
+    smoother = AdaptiveConcentrationSmoother()
+    window = SimpleNamespace(_concentration_smoother=smoother)
+    results = [
+        [_result("O2", 0.2), _result("N2", 0.8)],
+        [_result("O2", 0.4), _result("N2", 0.6)],
+    ]
+    status = SimpleNamespace(invalid_group_ids=("probe-b",))
+
+    display, exported = MainWindow._prepare_concentration_results(
+        window,
+        results,
+        ["probe-a", "probe-b"],
+        "time",
+        status,
+    )
+
+    assert [item.concentration for item in display[0]] == [0.2, 0.8]
+    assert [item.concentration for item in display[1]] == [0.0, 0.0]
+    assert [item.concentration for item in exported[1]] == [0.0, 0.0]
+    assert all(item.detected is False for item in exported[1])
+    assert all(key[0] != "probe-b" for key in smoother._state)

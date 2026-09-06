@@ -92,6 +92,18 @@ class TableDataModel(QAbstractTableModel):
         )
         return True
 
+    def set_headers(self, headers: Sequence[str]) -> None:
+        normalized = tuple(headers)
+        if normalized == self._headers:
+            return
+        self.beginResetModel()
+        self._headers = normalized
+        self._rows = [
+            row[: len(normalized)] + [""] * max(0, len(normalized) - len(row))
+            for row in self._rows
+        ]
+        self.endResetModel()
+
     def replace_rows(
         self,
         rows: Iterable[Sequence[object]],

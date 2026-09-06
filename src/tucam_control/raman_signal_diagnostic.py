@@ -66,6 +66,7 @@ class RamanSignalStatus:
     consecutive_all_noise_frames: int
     consecutive_recovery_frames: int = 0
     noise_only_group_ids: tuple[str, ...] = ()
+    invalid_group_ids: tuple[str, ...] = ()
 
 
 def _candidate_peak_width(region: np.ndarray) -> float:
@@ -150,12 +151,16 @@ class RamanSignalHealthMonitor:
         self._all_noise_frames = 0
         self._recovery_frames_seen = 0
         self._group_noise_frames: dict[str, int] = {}
+        self._group_recovery_frames: dict[str, int] = {}
+        self._failed_group_ids: set[str] = set()
         self._failed = False
 
     def reset(self) -> None:
         self._all_noise_frames = 0
         self._recovery_frames_seen = 0
         self._group_noise_frames.clear()
+        self._group_recovery_frames.clear()
+        self._failed_group_ids.clear()
         self._failed = False
 
     def mark_gap(self) -> None:
@@ -163,6 +168,7 @@ class RamanSignalHealthMonitor:
         self._all_noise_frames = 0
         self._recovery_frames_seen = 0
         self._group_noise_frames.clear()
+        self._group_recovery_frames.clear()
 
     def update(self, assessment: RamanSignalAssessment) -> RamanSignalStatus:
         if not assessment.groups:
@@ -176,20 +182,34 @@ class RamanSignalHealthMonitor:
             group.group_id or group.group_label: group.group_label
             for group in assessment.groups
         }
-        self._group_noise_frames = {
-            group_id: self._group_noise_frames.get(group_id, 0) + 1
-            if group_id in noise_group_ids
-            else 0
-            for group_id in active_ids
-        }
+        self._failed_group_ids.intersection_update(active_ids)
+        for group_id in active_ids:
+            if group_id in noise_group_ids:
+                noise_frames = self._group_noise_frames.get(group_id, 0) + 1
+                self._group_noise_frames[group_id] = noise_frames
+                self._group_recovery_frames[group_id] = 0
+                if noise_frames >= self._failure_frames:
+                    self._failed_group_ids.add(group_id)
+            else:
+                self._group_noise_frames[group_id] = 0
+                if group_id in self._failed_group_ids:
+                    recovery_frames = (
+                        self._group_recovery_frames.get(group_id, 0) + 1
+                    )
+                    self._group_recovery_frames[group_id] = recovery_frames
+                    if recovery_frames >= self._recovery_frames:
+                        self._failed_group_ids.discard(group_id)
+                        self._group_recovery_frames[group_id] = 0
+                else:
+                    self._group_recovery_frames[group_id] = 0
 
         if assessment.all_groups_noise_only:
             self._all_noise_frames += 1
             self._recovery_frames_seen = 0
         else:
             self._all_noise_frames = 0
-            # Global failure means every row group lost signal. Recovery is
-            # therefore confirmed once any row group has valid signal again.
+            # Global failure means every probe lost signal. Recovery is
+            # therefore confirmed once any probe has valid signal again.
             self._recovery_frames_seen = (
                 self._recovery_frames_seen + 1 if self._failed else 0
             )
@@ -197,11 +217,7 @@ class RamanSignalHealthMonitor:
         confirmed_group_ids = tuple(
             group.group_id or group.group_label
             for group in assessment.groups
-            if self._group_noise_frames.get(
-                group.group_id or group.group_label,
-                0,
-            )
-            >= self._failure_frames
+            if (group.group_id or group.group_label) in self._failed_group_ids
         )
         confirmed_groups = tuple(
             label_by_id[group_id] for group_id in confirmed_group_ids
@@ -212,8 +228,8 @@ class RamanSignalHealthMonitor:
             self._recovery_frames_seen = 0
             state = "failed"
             message = (
-                f"所有行组连续 {self._all_noise_frames} 帧未检测到有效拉曼信号，"
-                "请检查激光器、光路或行组位置"
+                f"所有探头连续 {self._all_noise_frames} 帧未检测到有效拉曼信号，"
+                "请检查激光器、光路或探头位置"
             )
         elif self._failed:
             if self._recovery_frames_seen >= self._recovery_frames:
@@ -222,7 +238,7 @@ class RamanSignalHealthMonitor:
                 if confirmed_groups:
                     state = "degraded"
                     message = (
-                        "全局拉曼信号已恢复；以下行组仍未检测到有效拉曼信号: "
+                        "全局拉曼信号已恢复；以下探头仍未检测到有效拉曼信号: "
                         + ", ".join(confirmed_groups)
                     )
                 else:
@@ -236,13 +252,22 @@ class RamanSignalHealthMonitor:
                 )
         elif confirmed_groups:
             state = "degraded"
-            message = "以下行组连续未检测到有效拉曼信号: " + ", ".join(confirmed_groups)
+            message = "以下探头连续未检测到有效拉曼信号: " + ", ".join(confirmed_groups)
         elif noise_group_ids:
             state = "suspect"
             message = "拉曼信号暂时偏弱，正在确认"
         else:
             state = "healthy"
             message = "拉曼信号正常"
+
+        invalid_group_ids = (
+            tuple(
+                group.group_id or group.group_label
+                for group in assessment.groups
+            )
+            if self._failed
+            else confirmed_group_ids
+        )
 
         return RamanSignalStatus(
             state=state,
@@ -260,4 +285,5 @@ class RamanSignalHealthMonitor:
                 for group in assessment.groups
                 if group.noise_only
             ),
+            invalid_group_ids=invalid_group_ids,
         )

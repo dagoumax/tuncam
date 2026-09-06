@@ -78,3 +78,17 @@ def test_extra_smooth_uses_seven_real_frames_at_three_second_exposure() -> None:
 
     assert profile.median_window == 7
     assert profile.median_window * 3 == 21
+
+def test_reset_groups_discards_only_selected_probe_history() -> None:
+    smoother = AdaptiveConcentrationSmoother()
+    first = [
+        [_result("O2", 0.2), _result("N2", 0.8)],
+        [_result("O2", 0.3), _result("N2", 0.7)],
+    ]
+    smoother.smooth_groups(first, ["probe-a", "probe-b"], mode="time")
+
+    smoother.reset_groups(["probe-a"])
+
+    assert all(key[0] != "probe-a" for key in smoother._state)
+    assert all(key[0] != "probe-a" for key in smoother._recent)
+    assert any(key[0] == "probe-b" for key in smoother._state)
