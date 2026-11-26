@@ -221,7 +221,10 @@ class DataTab(QWidget):
     def display_array(self, arr: np.ndarray) -> None:
         previous_rows = None if self._data is None else self._data.shape[0]
         self._data = np.asarray(arr)
-        self._cursor_on = False
+        if self._data.shape[1] == 0:
+            self._cursor_on = False
+        else:
+            self._cursor_idx = min(self._cursor_idx, self._data.shape[1] - 1)
         if previous_rows != self._data.shape[0]:
             self._controls_dirty = True
             self._apply_pending_controls()

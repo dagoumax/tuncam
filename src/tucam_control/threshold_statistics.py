@@ -118,7 +118,14 @@ class ThresholdStatisticsTracker:
         for (group_label, gas_name), state in sorted(self._states.items()):
             if state.latest_time is None or not state.samples:
                 continue
-            values = [value for _, value in state.samples]
+            cutoff = state.latest_time - timedelta(seconds=self._window_seconds)
+            values = []
+            for timestamp, value in reversed(state.samples):
+                if timestamp < cutoff:
+                    break
+                values.append(value)
+            if not values:
+                continue
             mean = sum(values) / len(values)
             variance = sum((value - mean) ** 2 for value in values) / len(values)
             standard_deviation = variance ** 0.5
@@ -145,7 +152,8 @@ class ThresholdStatisticsTracker:
         return snapshots
 
     def _trim_samples(self, state: _SeriesState, latest_time: datetime) -> None:
-        cutoff = latest_time - timedelta(seconds=self._window_seconds)
+        # Preserve enough real samples to support enlarging the visible window.
+        cutoff = latest_time - timedelta(seconds=86400)
         while state.samples and state.samples[0][0] < cutoff:
             state.samples.popleft()
 

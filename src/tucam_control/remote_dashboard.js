@@ -44,11 +44,6 @@ function renderLiveStatus(data) {
   latestStatus = data || {};
   $("camera").textContent = data.connected ? "已连接" : "未连接";
   $("capture").textContent = data.batch_running ? "批量测试" : data.capturing ? "连续采集" : "已停止";
-  const d = data.diagnostics || {};
-  $("exposure").textContent = fmt(d.exposure_readback_ms, " ms");
-  $("temperature").textContent = fmt(d.temperature_readback_c, " °C");
-  $("interval").textContent = fmt(d.frame_interval_ms, " ms");
-  $("processing").textContent = fmt(d.processing_ms, " ms");
   $("message").textContent = data.status || "--";
   $("start").disabled = !data.connected || data.capturing || data.batch_running;
   $("stop").disabled = !data.capturing && !data.batch_running;

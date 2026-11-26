@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -19,6 +20,25 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
 )
+from ..row_group_io import read_groups_csv, write_groups_csv, detect_folder_groups
+
+
+class _DetectionSignals(QObject):
+    finished = Signal(object, str)
+
+
+class _DetectionTask(QRunnable):
+    def __init__(self, folder, prominence, distance):
+        super().__init__()
+        self.args = (folder, prominence, distance)
+        self.signals = _DetectionSignals()
+
+    def run(self):
+        try:
+            rows = detect_folder_groups(*self.args)
+            self.signals.finished.emit(rows, "")
+        except Exception as exc:
+            self.signals.finished.emit(None, str(exc))
 
 from ..row_groups import (
     MAX_ROW_GROUPS,
@@ -41,6 +61,7 @@ class RowGroupDialog(QDialog):
         self.setWindowTitle("行组管理 / Row Group Manager")
         self.resize(720, 480)
         self._setup_ui()
+        self._detection_task = None
         descriptors = describe_row_groups(groups, custom_names=custom_names)
         self._replace_rows(
             [(item.label, item.start, item.end) for item in descriptors]
@@ -91,6 +112,32 @@ class RowGroupDialog(QDialog):
         tools.addWidget(self._count_label)
         layout.addLayout(tools)
 
+        file_tools = QHBoxLayout()
+        self._import_button = QPushButton("导入 CSV")
+        self._export_button = QPushButton("导出 CSV")
+        self._detect_button = QPushButton("从 TIFF 文件夹识别")
+        self._import_button.clicked.connect(self._import_csv)
+        self._export_button.clicked.connect(self._export_csv)
+        self._detect_button.clicked.connect(self._detect_folder)
+        for button in (self._import_button, self._export_button, self._detect_button):
+            file_tools.addWidget(button)
+        layout.addLayout(file_tools)
+        detection_options = QHBoxLayout()
+        detection_options.addWidget(QLabel("显著度 (%)"))
+        self._prominence = QSpinBox()
+        self._prominence.setRange(1, 80)
+        self._prominence.setValue(8)
+        detection_options.addWidget(self._prominence)
+        detection_options.addWidget(QLabel("最小间距 (行)"))
+        self._distance = QSpinBox()
+        self._distance.setRange(5, 500)
+        self._distance.setValue(20)
+        detection_options.addWidget(self._distance)
+        self._detection_status = QLabel()
+        self._detection_status.setWordWrap(True)
+        detection_options.addWidget(self._detection_status, 1)
+        layout.addLayout(detection_options)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -98,6 +145,54 @@ class RowGroupDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _import_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "导入探头配置", "", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            rows = read_groups_csv(path)
+            self._replace_rows(rows)
+            self._detection_status.setText(f"已导入 {len(rows)} 个探头，待保存")
+        except Exception as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+
+    def _export_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出探头配置", "probes.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            write_groups_csv(path, self._all_rows())
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _detect_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择 TIFF 文件夹")
+        if not folder:
+            return
+        self._detect_button.setEnabled(False)
+        self._import_button.setEnabled(False)
+        self._detection_status.setText("正在识别…")
+        task = _DetectionTask(folder, self._prominence.value(), self._distance.value())
+        task.signals.finished.connect(self._detection_finished)
+        self._detection_task = task
+        self._table.setEnabled(False)
+        for button in (self._add_button, self._delete_button, self._up_button, self._down_button):
+            button.setEnabled(False)
+        QThreadPool.globalInstance().start(task)
+
+    def _detection_finished(self, rows, error):
+        self._detection_task = None
+        self._detect_button.setEnabled(True)
+        self._import_button.setEnabled(True)
+        self._table.setEnabled(True)
+        for button in (self._add_button, self._delete_button, self._up_button, self._down_button):
+            button.setEnabled(True)
+        if error:
+            self._detection_status.setText(error)
+            return
+        self._replace_rows(rows)
+        self._detection_status.setText(f"识别到 {len(rows)} 个候选探头，待核对并保存")
 
     @staticmethod
     def _spin(value: int) -> QSpinBox:
@@ -199,6 +294,9 @@ class RowGroupDialog(QDialog):
         return groups, names
 
     def accept(self) -> None:
+        if self._detection_task is not None:
+            self._detection_status.setText("识别尚未完成，请等待或取消窗口")
+            return
         rows = self._all_rows()
         names_seen: set[str] = set()
         ranges_seen: set[tuple[int, int]] = set()

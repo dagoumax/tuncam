@@ -93,6 +93,10 @@ def _install_qt_message_handler() -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
+    if "--portable-self-test" in sys.argv:
+        from tucam_control.portable_self_test import run_self_test
+        index = sys.argv.index("--portable-self-test")
+        sys.exit(run_self_test(sys.argv[index + 1]))
     log_path = setup_app_logging()
     log = get_app_logger("main")
     log.info("Application starting; log: %s", log_path)

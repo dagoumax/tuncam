@@ -30,12 +30,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..camera_process import ProcessCameraController
+from ..background_io import BackgroundFileIO
 from ..concentration_smoother import AdaptiveConcentrationSmoother
 from ..data_processor import DataProcessor
 from ..debug_log import get_debug_logger
 from ..gas_analyzer import GasAnalyzer
 from ..processing_process import ProcessDataProcessor, process_frame_payload
-from ..raman_signal_diagnostic import RamanSignalHealthMonitor, assess_raman_signal
+from ..raman_signal_diagnostic import RamanSignalHealthMonitor
 from ..remote_server import (
     RemoteCommand,
     RemoteControlServer,
@@ -142,11 +143,12 @@ class _CaptureWorker(QObject):
     failed = Signal(int, str)
     finished = Signal(int)
 
-    def __init__(self, camera: ProcessCameraController, generation: int) -> None:
+    def __init__(self, camera: ProcessCameraController, generation: int, single: bool = False) -> None:
         super().__init__()
         self._camera = camera
         self._generation = generation
         self._stop_requested = False
+        self._single = single
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -154,6 +156,10 @@ class _CaptureWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            if self._stop_requested:
+                return
+            if not self._camera.is_capturing:
+                self._camera.start_capture()
             while not self._stop_requested and self._camera.is_capturing:
                 arr = self._camera.wait_for_frame(timeout_ms=CAPTURE_WAIT_TIMEOUT_MS)
                 if self._stop_requested or not self._camera.is_capturing:
@@ -166,12 +172,19 @@ class _CaptureWorker(QObject):
                         self.failed.emit(self._generation, "设备连接已断开")
                         break
                     continue
-                self.frame_ready.emit(self._generation, arr)
+                self.frame_ready.emit(self._generation, (arr, self._camera.last_frame_timestamp))
                 self.telemetry_ready.emit(self._generation, self._read_telemetry())
+                if self._single:
+                    break
         except Exception as exc:
             log.exception("Capture worker failed")
             self.failed.emit(self._generation, str(exc))
         finally:
+            if self._single and self._camera.is_capturing:
+                try:
+                    self._camera.stop_capture()
+                except Exception as exc:
+                    self.failed.emit(self._generation, str(exc))
             self.finished.emit(self._generation)
             QThread.currentThread().quit()
 
@@ -310,8 +323,11 @@ class MainWindow(QMainWindow):
         self._was_connected = False
         self._disconnect_warned = False
         self._last_frame: np.ndarray | None = None
+        self._last_frame_time: datetime | None = None
+        self._incoming_measurement_time: datetime | None = None
+        self._processing_context = (None, True)
         self._processing_busy = False
-        self._pending_frame: np.ndarray | None = None
+        self._pending_frame: tuple[np.ndarray, datetime | None, bool] | None = None
         self._processing_process = ProcessDataProcessor(timeout_seconds=12.0)
         self._processing_generation = 0
         self._frame_count = 0
@@ -325,10 +341,16 @@ class MainWindow(QMainWindow):
         self._last_raman_signal_state = "unavailable"
         self._dropped_pending_frames = 0
         self._auto_save_error_reported = False
+        self._closing_after_save = False
+        self._save_worker = BackgroundFileIO()
+        self._save_timer = QTimer(self)
+        self._save_timer.setInterval(50)
+        self._save_timer.timeout.connect(self._poll_save_jobs)
         self._capture_thread: QThread | None = None
         self._capture_worker: _CaptureWorker | None = None
         self._capture_generation = 0
         self._capture_stopping = False
+        self._single_capture = False
         self._connecting = False
         self._connection_generation = 0
         self._connection_task: _ConnectionTask | None = None
@@ -461,6 +483,7 @@ class MainWindow(QMainWindow):
         self._conc_tab.statistics_window_changed.connect(
             self._on_statistics_window_changed
         )
+        self._conc_tab.history_cleared.connect(self._on_history_cleared)
         self._data_tab.opengl_failed.connect(self._on_plot_opengl_failed)
         self._conc_tab.opengl_failed.connect(self._on_plot_opengl_failed)
 
@@ -927,24 +950,39 @@ class MainWindow(QMainWindow):
     def _auto_save_frame(self, arr: np.ndarray) -> bool:
         if not self._settings.get("auto_save", False):
             return True
-        save_dir = self._ensure_save_dir()
-        if save_dir is None:
-            self._handle_auto_save_failure("无法创建存储目录", stop_capture=True)
-            return False
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        save_dir = Path(str(self._settings.get("save_dir", DEFAULT_SAVE_DIR)).strip() or DEFAULT_SAVE_DIR).expanduser()
+        if not save_dir.is_absolute():
+            save_dir = project_root() / save_dir
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         path = Path(save_dir) / f"{ts}.tif"
         try:
-            self._save_array_image(arr, path)
-            self._clear_diagnostic_error("save")
-            self._auto_save_error_reported = False
-            self.status_changed.emit(f"已自动存储 / Auto saved: {path}")
-            log.info("Auto saved frame via Pillow: %s", path)
+            self._save_worker.submit("image", path, arr.copy())
+            self._save_timer.start()
             return True
         except Exception as exc:
             log.exception("Auto save failed: path=%s", path)
+            self._save_worker.cancel()
             self._set_diagnostic_error("save", f"自动存储失败: {path}: {exc}")
             self._handle_auto_save_failure(f"{path}\n\n{exc}", stop_capture=True)
             return False
+
+    def _poll_save_jobs(self) -> None:
+        for _, status, detail in self._save_worker.poll():
+            if status == "done":
+                self._clear_diagnostic_error("save")
+                self._auto_save_error_reported = False
+                log.info("Auto saved frame: %s", detail)
+            elif status == "error":
+                self._save_worker.cancel()
+                log.error("Background save failed: %s", detail)
+                self._set_diagnostic_error("save", str(detail))
+                if not self._closing_after_save:
+                    self._handle_auto_save_failure(str(detail), stop_capture=True)
+                break
+        if not self._save_worker.is_busy:
+            self._save_timer.stop()
+            if self._closing_after_save:
+                QTimer.singleShot(0, self.close)
 
     def _handle_auto_save_failure(self, message: str, stop_capture: bool = False) -> None:
         if stop_capture:
@@ -986,19 +1024,9 @@ class MainWindow(QMainWindow):
             self._conc_tab.mark_history_gap()
             self._raman_signal_monitor.mark_gap()
             self._publish_remote_gap("capture-start")
-            arr = self._camera.capture_single()
-            if arr is not None:
-                log.info("Single frame captured: shape=%s dtype=%s", arr.shape, arr.dtype)
-                self._acq_tab.display_frame(arr)
-                self._auto_save_frame(arr)
-                self.status_changed.emit("单帧采集完成 / Single frame captured")
-            else:
-                log.warning("Single capture timed out")
-                QMessageBox.warning(
-                    self,
-                    "采集超时 / Capture Timeout",
-                    "等待图像帧超时，请检查相机连接。",
-                )
+            self._start_capture_worker(single=True)
+            self._acq_tab.set_capturing_state(True)
+            self.status_changed.emit("单帧曝光中 / Single exposure running")
         except Exception as exc:
             log.exception("Single capture failed")
             QMessageBox.critical(
@@ -1021,7 +1049,6 @@ class MainWindow(QMainWindow):
             log.info("Continuous capture requested")
             self._conc_tab.mark_history_gap()
             self._raman_signal_monitor.mark_gap()
-            self._camera.start_capture()
             self._start_capture_worker()
             self._acq_tab.set_capturing_state(True)
             self._clear_diagnostic_error("capture")
@@ -1090,13 +1117,14 @@ class MainWindow(QMainWindow):
     # Continuous capture worker & refresh
     # ------------------------------------------------------------------
 
-    def _start_capture_worker(self) -> None:
+    def _start_capture_worker(self, single: bool = False) -> None:
         if self._capture_thread is not None and self._capture_thread.isRunning():
             raise RuntimeError("Capture worker is already running")
         self._capture_generation += 1
         generation = self._capture_generation
         thread = QThread(self)
-        worker = _CaptureWorker(self._camera, generation)
+        worker = _CaptureWorker(self._camera, generation, single=single)
+        self._single_capture = single
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.frame_ready.connect(self._on_capture_worker_frame)
@@ -1115,6 +1143,8 @@ class MainWindow(QMainWindow):
             return False
         self._capture_stopping = True
         self._capture_generation += 1
+        self._processing_generation = getattr(self, "_processing_generation", 0) + 1
+        self._pending_frame = None
         worker = self._capture_worker
         thread = self._capture_thread
         was_active = bool(
@@ -1129,12 +1159,16 @@ class MainWindow(QMainWindow):
             if worker is not None:
                 worker.request_stop()
             if self._camera.is_capturing:
-                self._camera.abort_wait()
+                try:
+                    self._camera.abort_wait()
+                except Exception:
+                    self._camera.force_terminate("abort wait failed")
             if thread is not None and thread.isRunning():
                 if not thread.wait(2000):
-                    log.error("Capture worker did not stop within 2000 ms")
-                    self._set_diagnostic_error("capture", "采集线程未能及时停止")
-                    return False
+                    self._camera.force_terminate("capture worker stop timeout")
+                    if not thread.wait(2000):
+                        self._set_diagnostic_error("capture", "采集线程未能及时停止")
+                        return False
             if self._camera.is_capturing:
                 self._camera.finish_stop_capture()
             self._capture_worker = None
@@ -1151,8 +1185,10 @@ class MainWindow(QMainWindow):
 
     @Slot(int, object)
     def _on_capture_worker_frame(self, generation: int, arr: np.ndarray) -> None:
-        if generation != self._capture_generation or not self._camera.is_capturing:
+        if generation != self._capture_generation:
             return
+        if isinstance(arr, tuple):
+            arr, self._incoming_measurement_time = arr
         self._clear_diagnostic_error("capture")
         log.debug("Continuous frame received: shape=%s dtype=%s", arr.shape, arr.dtype)
         self._acq_tab.display_frame(arr)
@@ -1174,6 +1210,7 @@ class MainWindow(QMainWindow):
         if generation != self._capture_generation:
             return
         log.warning("Capture worker reported failure: %s", message)
+        self._camera.force_terminate("capture worker failure: " + message)
         self._set_diagnostic_error("capture", f"采集线程失败: {message}")
         if "断开" in message:
             self._on_device_lost()
@@ -1189,6 +1226,16 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_capture_worker_finished(self, generation: int) -> None:
         if generation != self._capture_generation or self._capture_stopping:
+            return
+        if self._single_capture:
+            self._single_capture = False
+            thread = self._capture_thread
+            if thread is not None:
+                thread.wait(1000)
+            self._capture_thread = None
+            self._capture_worker = None
+            self._acq_tab.set_capturing_state(False)
+            self.status_changed.emit("单帧采集完成 / Single frame captured")
             return
         log.warning("Capture worker exited unexpectedly")
         self._stop_continuous_capture("worker exited")
@@ -1389,14 +1436,13 @@ class MainWindow(QMainWindow):
                     message = "批量测试正在运行，无法启动真实采集"
                 elif not self._camera.is_open:
                     message = "相机未连接，无法启动采集"
-                elif self._camera.is_capturing:
+                elif self._camera.is_capturing or self._capture_thread is not None:
                     ok = True
                     message = "连续采集已经运行"
                 else:
                     self._conc_tab.mark_history_gap()
                     self._raman_signal_monitor.mark_gap()
                     self._publish_remote_gap("remote-capture-start")
-                    self._camera.start_capture()
                     self._start_capture_worker()
                     self._acq_tab.set_capturing_state(True)
                     self._clear_diagnostic_error("capture")
@@ -1406,10 +1452,7 @@ class MainWindow(QMainWindow):
             elif command.action == "stop":
                 if self._batch_timer.isActive():
                     self._on_batch_stop()
-                if self._camera.is_capturing:
-                    ok = self._stop_continuous_capture("remote stop")
-                else:
-                    ok = True
+                ok = self._stop_continuous_capture("remote stop")
                 self._acq_tab.set_capturing_state(False)
                 message = "远程停止采集成功" if ok else "采集线程未能及时停止"
                 self.status_changed.emit(message)
@@ -1459,9 +1502,9 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self, updates: dict) -> None:
         updates = dict(updates)
         updates["row_group_names"] = normalize_row_group_names(
-            updates.get("row_group_names", {})
+            updates.get("row_group_names", self._settings.get("row_group_names", {}))
         )
-        raw_text = updates.get("row_groups_text", "")
+        raw_text = updates.get("row_groups_text", self._settings.get("row_groups_text", ""))
         groups = DataProcessor.parse_groups(raw_text)
         if raw_text.strip() and not groups:
             QMessageBox.warning(
@@ -1505,8 +1548,10 @@ class MainWindow(QMainWindow):
 
         old_gas_signature = self._gas_signature(self._analyzer.gases)
         new_gas_signature = self._gas_signature(updates.get("gas_configs", self._analyzer.gases))
+        # Alarm limits affect statistics, not the measured concentration.
+        calculation_signature = lambda signature: tuple(row[:5] + row[6:] for row in signature)
+        gas_calculation_changed = calculation_signature(old_gas_signature) != calculation_signature(new_gas_signature)
         old_smoothing = self._settings.get("concentration_smoothing", "balanced")
-        old_threshold_sigma = self._settings.get("detection_threshold_sigma", 3.0)
         changed_setting_keys = {
             key
             for key, value in updates.items()
@@ -1519,6 +1564,13 @@ class MainWindow(QMainWindow):
             "working_mode",
         }
         camera_settings_changed = bool(changed_setting_keys & camera_setting_keys)
+        analysis_keys = {
+            "row_aggregation", "merge_factor", "arpls_enabled", "detection_threshold_sigma",
+        }
+        if updates.get("arpls_enabled", self._settings.get("arpls_enabled", False)):
+            analysis_keys.update({"arpls_lam", "arpls_max_iter", "arpls_tol"})
+        ranges_changed = sorted(groups) != sorted(self._processor.row_groups)
+        calculation_changed = gas_calculation_changed or ranges_changed or bool(changed_setting_keys & analysis_keys)
 
         self._settings.update({key: value for key, value in updates.items() if key != "gas_configs"})
         self._configure_fps_display(
@@ -1542,7 +1594,8 @@ class MainWindow(QMainWindow):
             self._settings.get("statistics_window_seconds", 60)
         )
         self._update_diagnostics(batch_interval_ms=self._batch_timer.interval())
-        self._processing_generation += 1
+        if calculation_changed or changed_setting_keys & {"arpls_mode", "row_group_names", "row_groups_text"}:
+            self._processing_generation += 1
         if self._camera.is_open and camera_settings_changed:
             resume_capture = self._camera.is_capturing
             if resume_capture:
@@ -1554,7 +1607,6 @@ class MainWindow(QMainWindow):
             self._apply_current_settings()
             if resume_capture:
                 try:
-                    self._camera.start_capture()
                     self._start_capture_worker()
                     self._acq_tab.set_capturing_state(True)
                     log.info("Capture resumed after applying camera settings")
@@ -1604,8 +1656,7 @@ class MainWindow(QMainWindow):
 
         new_threshold_sigma = self._settings.get("detection_threshold_sigma", 3.0)
         if (
-            old_gas_signature != new_gas_signature
-            or old_threshold_sigma != new_threshold_sigma
+            calculation_changed
         ):
             log.info(
                 "Gas detection configuration changed; clearing concentration history: "
@@ -1620,9 +1671,10 @@ class MainWindow(QMainWindow):
             self._conc_tab.set_gas_names([g.name for g in self._analyzer.gases])
         elif old_smoothing != new_smoothing:
             log.info("Concentration smoothing changed: old=%s new=%s", old_smoothing, new_smoothing)
-            self._conc_tab.clear_history()
+            self._conc_tab.mark_history_gap()
 
-        self._reprocess_cached()
+        if calculation_changed or "arpls_mode" in changed_setting_keys:
+            self._reprocess_cached()
 
         try:
             path = save_user_settings(self._settings, self._analyzer.gases)
@@ -1633,7 +1685,8 @@ class MainWindow(QMainWindow):
             self._set_diagnostic_error("settings_save", f"设置保存失败: {exc}")
 
         self._configure_remote_server()
-        self.status_changed.emit("设置已应用 / Settings applied")
+        history_message = "计算参数改变，浓度历史已清除" if calculation_changed else "浓度历史已保留"
+        self.status_changed.emit(f"设置已应用 / Settings applied：{history_message}")
 
     # ------------------------------------------------------------------
     # Frame → data processing
@@ -1641,6 +1694,8 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, arr: np.ndarray) -> None:
         self._last_frame = arr.copy()
+        self._last_frame_time = self._incoming_measurement_time or datetime.now().astimezone()
+        self._incoming_measurement_time = None
         now = time.perf_counter()
         interval_ms = None
         if self._last_frame_perf is not None:
@@ -1662,13 +1717,13 @@ class MainWindow(QMainWindow):
             self._set_diagnostic_error("frame", f"图像信号很低: mean={float(arr.mean()):.2f}")
         else:
             self._clear_diagnostic_error("frame")
-        self._queue_frame_processing(arr)
+        self._queue_frame_processing(arr, measurement_time=self._last_frame_time)
 
-    def _queue_frame_processing(self, arr: np.ndarray) -> None:
+    def _queue_frame_processing(self, arr: np.ndarray, measurement_time=None, is_measurement=True) -> None:
         if self._processing_busy:
             if self._pending_frame is not None:
                 self._dropped_pending_frames += 1
-            self._pending_frame = arr.copy()
+            self._pending_frame = (arr.copy(), measurement_time, is_measurement)
             self._set_diagnostic_error("queue", "后台处理忙，已覆盖旧的待处理帧")
             self._update_diagnostics(
                 processing_busy=True,
@@ -1679,6 +1734,7 @@ class MainWindow(QMainWindow):
 
         self._processing_busy = True
         self._pending_frame = None
+        self._processing_context = (measurement_time, is_measurement)
         self._update_diagnostics(processing_busy=True, pending_frame=False)
         try:
             self._processing_process.submit(
@@ -1787,6 +1843,11 @@ class MainWindow(QMainWindow):
             self._data_tab.display_array(payload["result"])
             self._data_tab.set_baseline_data(payload["baseline"])
 
+            measurement_time, is_measurement = self._processing_context
+            if not is_measurement:
+                self._start_pending_processing()
+                return
+
             signal_status = self._raman_signal_monitor.update(
                 payload["raman_signal"]
             )
@@ -1809,7 +1870,7 @@ class MainWindow(QMainWindow):
             self._conc_tab.set_gas_names(payload["gas_names"])
             if payload["all_results"]:
                 group_ids = payload.get("group_ids", payload["labels"])
-                measurement_time = datetime.now().astimezone()
+                measurement_time = measurement_time or datetime.now().astimezone()
                 display_results, export_results = self._prepare_concentration_results(
                     payload["all_results"],
                     group_ids,
@@ -1888,7 +1949,7 @@ class MainWindow(QMainWindow):
             return
         frame = self._pending_frame
         self._pending_frame = None
-        self._queue_frame_processing(frame)
+        self._queue_frame_processing(frame[0], measurement_time=frame[1], is_measurement=frame[2])
 
     def _update_diagnostics(self, **updates) -> None:
         self._diagnostics.update(updates)
@@ -1926,71 +1987,25 @@ class MainWindow(QMainWindow):
         self._settings_tab.update_gas_table(self._analyzer.gases)
         self._reprocess_cached()
 
-    def _process_and_display(self, arr: np.ndarray) -> None:
-        try:
-            result = self._processor.process(arr)
-            row_groups = self._processor.row_groups
-            descriptors = describe_row_groups(
-                row_groups,
-                arr.shape[0],
-                self._settings.get("row_group_names", {}),
-            )
-            labels = [descriptor.label for descriptor in descriptors]
-            group_ids = [descriptor.key for descriptor in descriptors]
-            self._data_tab.set_row_labels(labels)
-            self._data_tab.display_array(result)
-            self._data_tab.set_baseline_data(self._processor.last_baseline)
-
-            # Gas analysis — per row group
-            gas_names = [g.name for g in self._analyzer.gases]
-            self._conc_tab.set_gas_names(gas_names)
-            if result.shape[0] > 0:
-                analysis_result = self._processor.last_analysis_result
-                if analysis_result is None:
-                    analysis_result = result
-                all_results = self._analyzer.analyze_groups(analysis_result)
-                signal_assessment = assess_raman_signal(
-                    analysis_result,
-                    labels,
-                    self._analyzer.gases,
-                    self._processor.merge_factor,
-                    group_ids=group_ids,
-                )
-                signal_status = self._raman_signal_monitor.update(signal_assessment)
-                self._conc_tab.update_raman_signal_status(signal_status)
-                mode = "time"
-                display_results, export_results = self._prepare_concentration_results(
-                    all_results,
-                    group_ids,
-                    mode,
-                    signal_status,
-                )
-                measurement_time = datetime.now().astimezone()
-                self._conc_tab.add_data_point(
-                    display_results,
-                    labels,
-                    mode=mode,
-                    raw_group_results=export_results,
-                    group_ids=group_ids,
-                    measurement_time=measurement_time,
-                )
-                self._publish_remote_concentrations(
-                    display_results,
-                    labels,
-                    group_ids,
-                    measurement_time,
-                )
-        except Exception as exc:
-            QMessageBox.warning(
-                self,
-                "处理错误 / Processing Error",
-                f"数据处理失败：\n{exc}",
-            )
 
     def _reprocess_cached(self) -> None:
         """Re-run full pipeline on cached image (for settings changes)."""
         if self._last_frame is not None:
-            self._queue_frame_processing(self._last_frame)
+            # Do not replace an actual waiting measurement with a display-only job.
+            if self._processing_busy and self._pending_frame is not None:
+                return
+            self._queue_frame_processing(
+                self._last_frame, measurement_time=self._last_frame_time,
+                is_measurement=False,
+            )
+
+    def _on_history_cleared(self) -> None:
+        self._processing_generation += 1
+        self._pending_frame = None
+        self._concentration_smoother.reset()
+        self._raman_signal_monitor.reset()
+        self._remote_server.reset_measurements()
+        self._remote_measurement_id = 0
 
     # ------------------------------------------------------------------
     # Close
@@ -2017,6 +2032,14 @@ class MainWindow(QMainWindow):
             return
         self._remote_command_timer.stop()
         self._remote_server.stop()
+        if self._save_worker.is_busy:
+            self._closing_after_save = True
+            self.setEnabled(False)
+            self.status_changed.emit("正在完成存储 / Finishing pending saves")
+            event.ignore()
+            return
+        self._save_worker.close()
+        self._conc_tab.cancel_export()
         self._pending_frame = None
         self._processing_process.shutdown()
         self._processing_busy = False

@@ -34,10 +34,16 @@ def test_remote_server_auth_snapshot_and_command_queue() -> None:
         status, body = _request(base_url, "/")
         assert status == 200
         assert "Dhyana 95 V2 远程控制" in body.decode("utf-8")
+        for removed_id in ("exposure", "temperature", "interval", "processing"):
+            assert f'id="{removed_id}"' not in body.decode("utf-8")
+        assert b'id="camera"' in body
+        assert b'id="capture"' in body
 
         status, body = _request(base_url, "/remote_dashboard.js")
         assert status == 200
         assert b"requestAnimationFrame" in body
+        for removed_id in ("exposure", "temperature", "interval", "processing"):
+            assert f'$("{removed_id}")' not in body.decode("utf-8")
         status, body = _request(base_url, "/remote_dashboard.css")
         assert status == 200
         assert b".status-grid" in body

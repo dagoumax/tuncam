@@ -9,6 +9,7 @@ import os
 import queue
 import threading
 import time
+from datetime import datetime
 from typing import Any
 
 from .camera_types import CameraInfo
@@ -23,7 +24,10 @@ def _put_latest(frame_queue, item) -> None:
             frame_queue.get_nowait()
         except queue.Empty:
             pass
-        frame_queue.put_nowait(item)
+        try:
+            frame_queue.put_nowait(item)
+        except queue.Full:
+            pass
 
 
 def _sdk_process_main(connection, frame_queue) -> None:
@@ -34,16 +38,17 @@ def _sdk_process_main(connection, frame_queue) -> None:
     capture_stop = threading.Event()
     capture_thread: threading.Thread | None = None
 
-    def capture_loop() -> None:
+    def capture_loop(session_id: int) -> None:
         while not capture_stop.is_set() and camera.is_capturing:
             arr = camera.wait_for_frame(timeout_ms=500)
             if capture_stop.is_set() or not camera.is_capturing:
                 break
             if arr is None:
                 if camera.last_frame_error:
-                    _put_latest(frame_queue, ("error", camera.last_frame_error))
+                    _put_latest(frame_queue, ("error", session_id, camera.last_frame_error))
                     break
                 continue
+            captured_at = datetime.now().astimezone()
             telemetry = {}
             for name, reader in {
                 "exposure_readback_ms": camera.get_exposure_time,
@@ -56,7 +61,13 @@ def _sdk_process_main(connection, frame_queue) -> None:
                     telemetry[name] = reader()
                 except Exception:
                     pass
-            _put_latest(frame_queue, ("frame", arr, telemetry))
+            _put_latest(frame_queue, ("frame", session_id, captured_at, arr, telemetry))
+
+    def guarded_capture_loop(session_id: int) -> None:
+        try:
+            capture_loop(session_id)
+        except Exception as exc:
+            _put_latest(frame_queue, ("error", session_id, str(exc)))
 
     try:
         while True:
@@ -72,7 +83,9 @@ def _sdk_process_main(connection, frame_queue) -> None:
                 if method == "start_capture":
                     camera.start_capture()
                     capture_stop.clear()
-                    capture_thread = threading.Thread(target=capture_loop, daemon=True)
+                    capture_thread = threading.Thread(
+                        target=guarded_capture_loop, args=(args[0],), daemon=True
+                    )
                     capture_thread.start()
                     result = None
                 elif method == "abort_wait":
@@ -119,6 +132,9 @@ class ProcessCameraController:
         self._last_frame_error: str | None = None
         self._telemetry: dict[str, Any] = {}
         self._exposure_ms = 1000.0
+        self._session_id = 0
+        self._last_frame_monotonic = 0.0
+        self._last_frame_timestamp: datetime | None = None
 
     def _start_process(self) -> None:
         if self._process is not None and self._process.is_alive():
@@ -147,12 +163,18 @@ class ProcessCameraController:
             if process.is_alive():
                 process.kill()
                 process.join(timeout=1.0)
+        if self._connection is not None:
+            self._connection.close()
+        if self._frame_queue is not None:
+            self._frame_queue.cancel_join_thread()
+            self._frame_queue.close()
         self._process = self._connection = self._frame_queue = None
         self._is_open = self._is_capturing = False
+        self._telemetry.clear()
 
     def _rpc(self, method: str, *args, timeout: float = 5.0):
-        self._start_process()
         with self._rpc_lock:
+            self._start_process()
             process = self._process
             connection = self._connection
             self._request_id += 1
@@ -209,13 +231,18 @@ class ProcessCameraController:
         finally:
             if self._process is not None:
                 self._process.join(timeout=1.0)
-            self._process = self._connection = self._frame_queue = None
-            self._is_open = self._is_capturing = False
+            self._terminate_process("shutdown cleanup")
 
     def start_capture(self) -> None:
-        self._rpc("start_capture", timeout=8.0)
+        if self._is_capturing:
+            raise RuntimeError("Capture is already running")
+        self._session_id += 1
+        self._rpc("start_capture", self._session_id, timeout=8.0)
         self._is_capturing = True
         self._last_frame_error = None
+        self._last_frame_monotonic = time.monotonic()
+        self._last_frame_timestamp = None
+        self._telemetry.clear()
 
     def abort_wait(self) -> None:
         if self._is_capturing:
@@ -233,17 +260,38 @@ class ProcessCameraController:
     def wait_for_frame(self, timeout_ms: int = 2000):
         if not self._is_capturing or self._frame_queue is None:
             return None
-        try:
-            event = self._frame_queue.get(timeout=max(0.05, timeout_ms / 1000.0))
-        except queue.Empty:
-            return None
-        if event[0] == "error":
-            self._last_frame_error = event[1]
-            return None
-        _, arr, telemetry = event
-        self._telemetry.update(telemetry)
-        self._last_frame_error = None
-        return arr
+        deadline = time.monotonic() + max(0.05, timeout_ms / 1000.0)
+        while self._is_capturing:
+            if self._process is None or not self._process.is_alive():
+                self._last_frame_error = "SDK process exited during capture"
+                raise RuntimeError(self._last_frame_error)
+            allowed_gap = max(5.0, self._exposure_ms / 1000.0 * 2.0 + 3.0)
+            if time.monotonic() - self._last_frame_monotonic > allowed_gap:
+                self._last_frame_error = f"No camera frame for {allowed_gap:.1f} seconds"
+                raise TimeoutError(self._last_frame_error)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                event = self._frame_queue.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+            if event[1] != self._session_id:
+                continue
+            if event[0] == "error":
+                self._last_frame_error = event[2]
+                raise RuntimeError(self._last_frame_error)
+            _, _, captured_at, arr, telemetry = event
+            self._last_frame_monotonic = time.monotonic()
+            self._last_frame_timestamp = captured_at
+            self._telemetry.update(telemetry)
+            self._last_frame_error = None
+            return arr
+        return None
+
+    @property
+    def last_frame_timestamp(self) -> datetime | None:
+        return self._last_frame_timestamp
 
     def capture_single(self):
         self.start_capture()
@@ -254,7 +302,7 @@ class ProcessCameraController:
 
     def connection_status(self):
         if self._is_capturing:
-            return None
+            return None if self._process is not None and self._process.is_alive() else False
         return self._rpc("connection_status")
 
     def is_connected(self) -> bool:
@@ -273,8 +321,11 @@ class ProcessCameraController:
                 "get_bit_depth": "bit_depth",
                 "get_working_mode": "working_mode",
             }.get(name)
-            if cache_key in self._telemetry:
-                return lambda: self._telemetry[cache_key]
+            def cached_read():
+                if cache_key not in self._telemetry:
+                    raise RuntimeError(f"Telemetry not available during capture: {name}")
+                return self._telemetry[cache_key]
+            return cached_read
         if name.startswith("_"):
             raise AttributeError(name)
         return lambda *args: self._rpc(name, *args)

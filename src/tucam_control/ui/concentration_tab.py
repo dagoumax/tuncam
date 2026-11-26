@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QTableView,
@@ -30,6 +31,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..threshold_statistics import ThresholdStatisticsTracker
+from ..background_io import BackgroundFileIO
+from ..concentration_export import write_concentration_csv, split_samples
 from .plot_style import COLORS, WINDOW_SIZE
 from .table_models import TableDataModel
 
@@ -67,6 +70,7 @@ class ConcentrationTab(QWidget):
 
     emergency_stop_requested = Signal()
     statistics_window_changed = Signal(int)
+    history_cleared = Signal()
     opengl_failed = Signal(str)
 
     def __init__(self) -> None:
@@ -74,6 +78,7 @@ class ConcentrationTab(QWidget):
         # _history[group_label][gas_name] = (vals, times)
         self._history: dict[str, dict[str, tuple[list[float], list[object]]]] = {}
         self._raw_history: dict[str, dict[str, tuple[list[float], list[object]]]] = {}
+        self._history_breaks: list[datetime] = []
         self._gas_names: list[str] = []
         self._group_ids: list[str] = []
         self._group_labels: list[str] = []
@@ -86,6 +91,11 @@ class ConcentrationTab(QWidget):
         self._display_y_range: tuple[float, float] | None = None
         self._export_smoothed: bool = True
         self._export_sample_rate_hz: int = 1000
+        self._export_worker = BackgroundFileIO(capacity=1, timeout_seconds=60)
+        self._export_timer = QTimer(self)
+        self._export_timer.setInterval(50)
+        self._export_timer.timeout.connect(self._poll_export)
+        self._export_dialog = None
         self._statistics = ThresholdStatisticsTracker(window_seconds=60)
         self._display_animation: dict[tuple[str, str], dict[str, float]] = {}
         self._curve_items: dict[tuple[str, str], pg.PlotDataItem] = {}
@@ -437,8 +447,25 @@ class ConcentrationTab(QWidget):
         self._refresh_statistics_table()
 
     def mark_history_gap(self) -> None:
+        latest = [times[-1] for gases in self._history.values()
+                  for _, times in gases.values() if times]
+        if latest:
+            boundary = max(latest)
+            if boundary not in self._history_breaks:
+                self._history_breaks.append(boundary)
+                self._history_breaks.sort()
+        self._display_animation.clear()
+        self._animation_tail_cache.clear()
+        for curve in self._tail_curve_items.values():
+            curve.setVisible(False)
+        self._dirty = True
         self._statistics.mark_gap()
         self._refresh_statistics_table()
+
+    def _crosses_gap(self, start, end) -> bool:
+        from bisect import bisect_left
+        index = bisect_left(self._history_breaks, start)
+        return index < len(self._history_breaks) and self._history_breaks[index] < end
 
     def update_raman_signal_status(self, status) -> None:
         state = str(getattr(status, "state", "unavailable"))
@@ -521,6 +548,7 @@ class ConcentrationTab(QWidget):
     def clear_history(self) -> None:
         self._history.clear()
         self._raw_history.clear()
+        self._history_breaks.clear()
         self._statistics.reset()
         self._display_animation.clear()
         self._animation_tail_cache.clear()
@@ -532,6 +560,7 @@ class ConcentrationTab(QWidget):
         self._statistics_model.clear()
         self.update_raman_signal_status(None)
         self._do_redraw()
+        self.history_cleared.emit()
 
     # ------------------------------------------------------------------
     # Internal
@@ -771,7 +800,8 @@ class ConcentrationTab(QWidget):
 
             static_x = x_vals
             static_y = y_vals
-            if is_datetime and len(x_vals) >= 2:
+            if (is_datetime and len(x_vals) >= 2
+                    and not self._crosses_gap(clipped_times[-2], clipped_times[-1])):
                 progress = self._time_aligned_display_progress(clipped_times)
                 tail_x_end = x_vals[-2] + (x_vals[-1] - x_vals[-2]) * progress
                 animation = self._display_animation.get(series_key, {})
@@ -792,6 +822,15 @@ class ConcentrationTab(QWidget):
 
             axis_x.extend(static_x)
             all_y.extend(y_vals)
+            if is_datetime and len(static_x) > 1:
+                split_x, split_y = [static_x[0]], [static_y[0]]
+                for index in range(1, len(static_x)):
+                    if self._crosses_gap(clipped_times[index - 1], clipped_times[index]):
+                        split_x.append(float("nan"))
+                        split_y.append(float("nan"))
+                    split_x.append(static_x[index])
+                    split_y.append(static_y[index])
+                static_x, static_y = split_x, split_y
             if dense_mode:
                 batch_x, batch_y = dense_batches.setdefault(color, ([], []))
                 if batch_x:
@@ -812,7 +851,7 @@ class ConcentrationTab(QWidget):
                 self._curve_items[series_key] = curve
                 self._marker_items[series_key] = marker
             curve.setPen(pen)
-            curve.setData(static_x, static_y)
+            curve.setData(static_x, static_y, connect="finite")
             curve.setVisible(True)
             if series_key not in self._animation_tail_cache:
                 marker.setData(
@@ -978,6 +1017,9 @@ class ConcentrationTab(QWidget):
                 vals = self._history.get(glabel, {}).get(result.name, ([], []))[0]
                 times = self._history.get(glabel, {}).get(result.name, ([], []))[1]
                 previous = float(vals[-2]) if len(vals) >= 2 else target
+                if len(times) >= 2 and self._crosses_gap(times[-2], times[-1]):
+                    self._display_animation.pop(key, None)
+                    continue
                 start_value = self._current_display_value(key, previous)
                 duration = DISPLAY_ANIMATION_DURATION_S
                 if (
@@ -1363,135 +1405,94 @@ class ConcentrationTab(QWidget):
                 group_data = self._selected_group_data()
                 raw_group_data = self._raw_history.get(glabel, {})
                 export_data = group_data if self._export_smoothed else raw_group_data
-                self._write_csv(path, export_data, gas_names, export_range)
+                columns = self._export_columns(export_data, gas_names, export_range)
             else:
                 if not self._group_ids or not self._history:
                     QMessageBox.information(self, "导出", "没有数据。")
                     return
                 export_history = self._history if self._export_smoothed else self._raw_history
-                self._write_csv_all_groups(path, export_history, gas_names, export_range)
+                columns = self._export_columns_all(export_history, gas_names, export_range)
 
-            QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{path}")
+            self._export_worker.submit("csv", path, {
+                "columns": columns, "sample_rate": self._export_sample_rate_hz,
+                "breaks": tuple(self._history_breaks),
+            })
+            self._btn_export.setEnabled(False)
+            self._export_dialog = QProgressDialog("正在导出 / Exporting", "取消 / Cancel", 0, 100, self)
+            self._export_dialog.setAutoClose(False)
+            self._export_dialog.canceled.connect(self.cancel_export)
+            self._export_dialog.show()
+            self._export_timer.start()
         except Exception as exc:
+            self.cancel_export()
             QMessageBox.critical(self, "导出失败 / Export Failed", str(exc))
+
+    def cancel_export(self) -> None:
+        self._export_timer.stop()
+        self._export_worker.cancel()
+        self._btn_export.setEnabled(True)
+        if self._export_dialog is not None:
+            dialog, self._export_dialog = self._export_dialog, None
+            dialog.blockSignals(True)
+            dialog.close()
+            dialog.deleteLater()
+
+    def _poll_export(self) -> None:
+        for _, status, detail in self._export_worker.poll():
+            if status == "progress":
+                if self._export_dialog is not None:
+                    self._export_dialog.setValue(min(99, detail))
+                continue
+            self.cancel_export()
+            if status == "done":
+                QMessageBox.information(self, "导出成功 / Export OK", f"已保存至:\n{detail}")
+            else:
+                QMessageBox.critical(self, "导出失败 / Export Failed", str(detail))
+            break
+
+    def _export_columns(self, group_data, gas_names, export_range):
+        columns = []
+        for name in gas_names:
+            values, times = self._filtered_pairs(*group_data.get(name, ([], [])), export_range)
+            columns.append((name, list(values), list(times)))
+        return columns
+
+    def _export_columns_all(self, history, gas_names, export_range):
+        columns = []
+        for gas in gas_names:
+            for group_id in self._group_ids:
+                if gas not in history.get(group_id, {}):
+                    continue
+                values, times = self._filtered_pairs(*history[group_id][gas], export_range)
+                label = self._group_label_by_id.get(group_id, group_id)
+                columns.append((f"{gas}({label})", list(values), list(times)))
+        return columns
 
     def _write_csv_all_groups(self, path: str, history: dict, gas_names: list[str],
                               export_range: object) -> None:
-        """Export all groups using either smoothed or raw concentration history."""
-        from datetime import datetime as dt_type
-        is_datetime = False
-        for group_id in self._group_ids:
-            if group_id not in history:
-                continue
-            for _, (_, times) in history[group_id].items():
-                if len(times) > 0:
-                    is_datetime = isinstance(times[0], dt_type)
-                    break
-
-        columns: list[tuple[str, str, str]] = []  # (gas_name, group_label, header)
-        for gas in gas_names:
-            for group_id in self._group_ids:
-                if group_id in history and gas in history[group_id]:
-                    label = self._group_label_by_id.get(group_id, group_id)
-                    columns.append((gas, group_id, f"{gas}({label})"))
-
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            for _, _, h in columns:
-                header.append(h)
-            writer.writerow(header)
-
-            prepared = []
-            for gas, lbl, _ in columns:
-                vals, times = history[lbl][gas]
-                export_vals, export_times = self._filtered_pairs(vals, times, export_range)
-                export_vals, export_times = self._resampled_pairs(export_vals, export_times)
-                prepared.append((export_vals, export_times))
-
-            max_len = max((len(vals) for vals, _ in prepared), default=0)
-            for i in range(max_len):
-                row = []
-                t_val = ""
-                for _, times in prepared:
-                    if i < len(times):
-                        if is_datetime:
-                            t_val = self._format_export_time(times[i])
-                        else:
-                            t_val = str(int(times[i]))
-                        break
-                row.append(t_val)
-                for vals, _ in prepared:
-                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
-                writer.writerow(row)
+        write_concentration_csv(path, self._export_columns_all(history, gas_names, export_range),
+                                self._export_sample_rate_hz, self._history_breaks)
 
     def _write_csv(self, path: str, group_data: dict, gas_names: list[str],
                    export_range: object) -> None:
-        from datetime import datetime as dt_type
-        is_datetime = False
-        for _, (_, times) in group_data.items():
-            if len(times) > 0:
-                is_datetime = isinstance(times[0], dt_type)
-                break
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            header = ["时间 / Time" if is_datetime else "帧序号 / Index"]
-            for name in gas_names:
-                header.append(name)
-            writer.writerow(header)
+        write_concentration_csv(path, self._export_columns(group_data, gas_names, export_range),
+                                self._export_sample_rate_hz, self._history_breaks)
 
-            prepared = []
-            for name in gas_names:
-                export_vals, export_times = self._filtered_pairs(
-                    *group_data.get(name, ([], [])),
-                    export_range,
-                )
-                export_vals, export_times = self._resampled_pairs(export_vals, export_times)
-                prepared.append((name, export_vals, export_times))
-
-            max_len = max((len(vals) for _, vals, _ in prepared), default=0)
-            for i in range(max_len):
-                row = []
-                t_val = ""
-                for _, _, times in prepared:
-                    if i < len(times):
-                        if is_datetime:
-                            t_val = self._format_export_time(times[i])
-                        else:
-                            t_val = str(int(times[i]))
-                        break
-                row.append(t_val)
-                for _, vals, _ in prepared:
-                    row.append(f"{vals[i]:.4f}" if i < len(vals) else "")
-                writer.writerow(row)
-
-    def _resampled_pairs(
-        self,
-        vals: list[float],
-        times: list[object],
-    ) -> tuple[list[float], list[object]]:
-        if len(vals) < 2 or len(times) < 2 or not isinstance(times[0], datetime):
+    def _resampled_pairs(self, vals, times):
+        if len(vals) < 2 or not times or not isinstance(times[0], datetime):
             return vals, times
-
-        pairs = [(t.timestamp(), value) for value, t in zip(vals, times) if isinstance(t, datetime)]
-        x = np.asarray([pair[0] for pair in pairs], dtype=float)
-        y = np.asarray([pair[1] for pair in pairs], dtype=float)
-        if len(x) < 2:
-            return vals, times
-
-        unique_x, unique_indices = np.unique(x, return_index=True)
-        y = y[unique_indices]
-        if len(unique_x) < 2 or unique_x[-1] <= unique_x[0]:
-            return vals, times
-
-        step = 1.0 / self._export_sample_rate_hz
-        sample_count = int(np.floor((unique_x[-1] - unique_x[0]) / step)) + 1
-        target_x = unique_x[0] + np.arange(sample_count, dtype=float) * step
-        target_x = target_x[target_x <= unique_x[-1] + step * 1e-6]
-        interpolator = PchipInterpolator(unique_x, y, extrapolate=False)
-        target_y = np.asarray(interpolator(target_x), dtype=float)
-        target_times = [datetime.fromtimestamp(value) for value in target_x]
-        return target_y.tolist(), target_times
+        result_values, result_times = [], []
+        for pairs in split_samples(vals, times, self._history_breaks):
+            x, y = map(np.asarray, zip(*pairs))
+            if len(x) == 1:
+                targets, values = x, y
+            else:
+                count = int(np.floor((x[-1] - x[0]) * self._export_sample_rate_hz)) + 1
+                targets = x[0] + np.arange(count) / self._export_sample_rate_hz
+                values = PchipInterpolator(x, y, extrapolate=False)(targets)
+            result_values.extend(values.tolist())
+            result_times.extend(datetime.fromtimestamp(value) for value in targets)
+        return result_values, result_times
 
     @staticmethod
     def _format_export_time(value: datetime) -> str:
